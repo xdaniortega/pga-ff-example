@@ -1,0 +1,11 @@
+# >>> ai-driven-development >>>
+.crew/
+# <<< ai-driven-development <<<
+
+# workshop
+.env
+.env.*
+!.env.example
+out/
+cache/
+node_modules/
