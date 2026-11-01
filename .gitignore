@@ -9,3 +9,7 @@
 out/
 cache/
 node_modules/
+
+# local tooling and planning
+.claude/
+plan.md
