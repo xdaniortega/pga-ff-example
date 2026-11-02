@@ -809,7 +809,8 @@ export function formatMatrix(rows: readonly MatrixRow[], records: readonly Trial
   const head = ['Scen', 'Mine', 'Rival', 'Wins', 'Deciding effect']
   const body = rows.map((r) => [r.scenario.toUpperCase(), r.mine, r.rival, `${r.wins}/${r.trials}`, r.effects.length > 0 ? r.effects.join(' + ') : '-'])
   const w = head.map((h, c) => Math.max(h.length, ...body.map((b) => b[c]!.length)))
-  const fmt = (cells: string[]) => cells.map((x, c) => (c === cells.length - 1 ? x : x.padEnd(w[c]!))).join('  ').trimEnd()
+  // The trailing "Deciding effect" stays left; the wins count is right-aligned with the other numbers of the repo's tables.
+  const fmt = (cells: string[]) => cells.map((x, c) => (c === 3 ? x.padStart(w[c]!) : c === cells.length - 1 ? x : x.padEnd(w[c]!))).join('  ').trimEnd()
   const table = [fmt(head), fmt(w.map((n) => '-'.repeat(n))), ...body.map(fmt)]
   const notes: string[] = []
   notes.push(...noteBlock('feed = Fast Feed; poll = the RPC polled; tips in gwei; +Nms = fires N ms after Opened.'))

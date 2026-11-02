@@ -86,8 +86,8 @@ test('printers, colour forced on: prefix and style of each kind', () => {
   setInternalVisible(false)
   assert.deepEqual(r.out, [
     `\x1b[36m==> buying 1 ticket${RESET}`,
-    `\x1b[33mNOTE: a ticket bought in round N is active in round N+1 only${RESET}`,
-    `\x1b[1;7mYOUR TX: idx 0${RESET}`,
+    `\x1b[33m\x1b[1mNOTE:${RESET}\x1b[33m a ticket bought in round N is active in round N+1 only${RESET}`,
+    `\x1b[1;7mYOUR TX: idx 0${' '.repeat(80 - 'YOUR TX: idx 0'.length)}${RESET}`,
     `\x1b[35m[sequencer] round 2: drained order${RESET}`,
     `\x1b[31m[sequencer] FEED RECEIPT MISMATCH block 3${RESET}`,
     `\x1b[35m[feed] round ended${RESET}`,
@@ -130,7 +130,10 @@ test('warn(): bold yellow WARNING: on stdout, one prefix, plain when colour is o
   assert.deepEqual(on.out, [`\x1b[1;33mWARNING: careful${RESET}`])
   assert.deepEqual(on.err, [])
   assert.deepEqual(capture(() => warn('careful'), {}).out, ['WARNING: careful'])
-  assert.deepEqual(capture(() => noteLines(['NOTE: a', '      b']), { FORCE_COLOR: '1' }).out, [`\x1b[33mNOTE: a${RESET}`, `\x1b[33m      b${RESET}`])
+  assert.deepEqual(capture(() => noteLines(['NOTE: a', '      b']), { FORCE_COLOR: '1' }).out, [
+    `\x1b[33m\x1b[1mNOTE:${RESET}\x1b[33m a${RESET}`,
+    `\x1b[33m      b${RESET}`,
+  ])
 })
 
 test('note(): always starts with NOTE:, never doubled', () => {

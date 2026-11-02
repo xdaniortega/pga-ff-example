@@ -72,7 +72,7 @@ export function noteText(msg: string): string {
 
 /** An explanation that is not an action. Prints "NOTE: msg" (the prefix is added once, also without colour). */
 export function note(msg: string): void {
-  console.log(color('note', noteText(msg)))
+  console.log(noteColor(noteText(msg)))
 }
 
 /** Pure: a warning line. Always starts with "WARNING:", never doubled. */
@@ -85,14 +85,35 @@ export function warn(msg: string): void {
   console.log(color('warn', warnText(msg)))
 }
 
+/** True when `line` starts with the one-line prefix (never doubled by the printers above). */
+const splitPrefix = (line: string, prefix: string): string | undefined => (line.startsWith(prefix) ? line.slice(prefix.length) : undefined)
+
+/** Colour of one NOTE line: a bold `NOTE:` prefix over the yellow body, so the marker stands out on a terminal (plain text unchanged). */
+function noteColor(line: string): string {
+  const enabled = colorEnabled(process.stdout.isTTY)
+  const rest = enabled ? splitPrefix(line, 'NOTE:') : undefined
+  if (rest === undefined) return color('note', line, enabled)
+  return `${PALETTE.note}${PALETTE.bold}NOTE:${RESET}${PALETTE.note}${rest}${RESET}`
+}
+
 /** Pre-formed NOTE lines (the first starts with `NOTE:`, the continuation lines are indented): printed in the note colour, one line each. */
 export function noteLines(lines: readonly string[]): void {
-  for (const l of lines) console.log(color('note', l))
+  for (const l of lines) console.log(noteColor(l))
+}
+
+/** An `important` line is padded to this many columns on a terminal, so chapter headers and headings read as full-width bars. */
+export const IMPORTANT_BAR_COLS = 80
+
+/** Pure: the text an important line shows (padded to a bar only when colour is on; piped output keeps every byte). */
+export function importantBar(msg: string, enabled: boolean = colorEnabled(process.stdout.isTTY), columns: number | undefined = process.stdout.columns): string {
+  if (!enabled) return msg
+  const w = Math.min(IMPORTANT_BAR_COLS, columns ?? IMPORTANT_BAR_COLS)
+  return msg.length >= w ? msg : msg.padEnd(w)
 }
 
 /** An important step: bold and highlighted. */
 export function important(msg: string): void {
-  console.log(color('important', msg))
+  console.log(color('important', importantBar(msg)))
 }
 
 /** Sequencer internals: magenta, and only visible in --local. */

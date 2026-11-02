@@ -239,7 +239,8 @@ function table(head: string[], body: string[][], prefixes: string[]): string[] {
   const widths = head.map((h, i) => Math.max(h.length, ...body.map((r) => r[i]!.length)))
   const build = (gap: number) => {
     const line = (cells: string[], prefix: string) => `${prefix}${cells.map((c, i) => (i === 0 ? c.padEnd(widths[i]!) : c.padStart(widths[i]!))).join(' '.repeat(gap))}`.trimEnd()
-    return [line(head, '   '), ...body.map((r, i) => line(r, prefixes[i]!))]
+    const rule = (prefix: string) => `${prefix}${widths.map((w) => '-'.repeat(w)).join(' '.repeat(gap))}`
+    return [line(head, '   '), rule('   '), ...body.map((r, i) => line(r, prefixes[i]!))]
   }
   const wide = build(2)
   return Math.max(...wide.map((l) => l.length)) <= WIDTH ? wide : build(1)
@@ -327,11 +328,11 @@ export function comparisonSkipNote(reason: string): OutLine[] {
   return noteOf(`Comparison with and without Fast Feed skipped: ${reason}.`)
 }
 
-/** Pure: a table of columns, first column left-aligned, the rest right-aligned, with a trailing marker per row. */
+/** Pure: a table of columns, first column left-aligned, the rest right-aligned, a rule under the header and a trailing marker per row. */
 function viewTable(head: string[], body: string[][], marks: string[]): string[] {
   const widths = head.map((h, i) => Math.max(h.length, ...body.map((r) => r[i]!.length)))
   const cells = (c: string[]) => c.map((x, i) => (i === 0 ? x.padEnd(widths[i]!) : x.padStart(widths[i]!))).join('  ')
-  return [`   ${cells(head)}`.trimEnd(), ...body.map((r, i) => `   ${cells(r)}${marks[i]}`)]
+  return [`   ${cells(head)}`.trimEnd(), `   ${widths.map((w) => '-'.repeat(w)).join('  ')}`, ...body.map((r, i) => `   ${cells(r)}${marks[i]}`)]
 }
 
 /** F5: which part of the comparison is shown: 1 = round 1 on the left only; 2 = + round 2 on the left and the whole block N on the right; 3 = + block M on the right. */
@@ -412,9 +413,9 @@ export function formatBlockComparison(i: BlockComparisonInput, stage: Comparison
  */
 export function formatComparisonStage(i: BlockComparisonInput, stage: ComparisonStage): OutLine[] {
   if (stage === 1) {
-    // F6: the rows of round 1 (after FF heading, block header, round header and column header) are flagged for the paced reveal.
+    // F6: the rows of round 1 (after FF heading, block header, round header, column header and its rule) are flagged for the paced reveal.
     const out = formatBlockComparison({ ...i, columns: undefined }, 1)
-    return out[0]?.text === FF_HEADING ? out.map((l, n) => (n >= 4 ? { ...l, row: true as const } : l)) : out
+    return out[0]?.text === FF_HEADING ? out.map((l, n) => (n >= 5 ? { ...l, row: true as const } : l)) : out
   }
   const got = comparisonRows(i, stage)
   if ('skip' in got) return stage === 3 ? [] : got.skip
@@ -423,8 +424,8 @@ export function formatComparisonStage(i: BlockComparisonInput, stage: Comparison
   if (stage === 3) return v.rivalBlock.length > 0 ? plainOf(['', ...v.rivalBlock]) : []
   return [
     ...noteOf(`round 1 again, now that block ${i.block} is sealed and the gain can be measured.`),
-    // F6: round 1 was already shown in stage 1 (its reprint is not paced); the rows of any later round are shown for the first time.
-    ...v.rounds.flatMap((r, n) => [...(n > 0 ? plainOf(['']) : []), ...plainOf(r).map((l, k) => (k >= 2 && v.roundNos[n] !== 1 ? { ...l, row: true as const } : l))]),
+    // F6: round 1 was already shown in stage 1 (its reprint is not paced); the rows of any later round are shown for the first time (after its round header, column header and rule).
+    ...v.rounds.flatMap((r, n) => [...(n > 0 ? plainOf(['']) : []), ...plainOf(r).map((l, k) => (k >= 3 && v.roundNos[n] !== 1 ? { ...l, row: true as const } : l))]),
     { text: '', kind: 'plain' },
     { text: NO_FF_HEADING, kind: 'important' },
     ...plainOf(v.right),
@@ -517,8 +518,18 @@ export function formatFcfsComparison(pgaRows: readonly LiveRow[], arrivals: read
   const first = pgaRows[0]
   const title = `hypothetical FCFS (local simulator data): round ${o.round ?? first?.pgaRound ?? '?'} of block ${o.block ?? first?.blockNumber ?? '?'}`
   const mark = (r: LiveRow) => (isMineRow(r, o.mine) ? ' <- yours' : '')
-  const left = pgaRows.map((r, i) => `${i + 1}. ${labelOf(labels, r.hash, o.competitors)}  ${formatGwei(r.effectiveTip)} gwei${mark(r)}`)
+  // Aligned columns: rank, label, then the tip right-aligned. The (c) competitor marker moves to the row tail here: left
+  // inline it would widen the label column and push the paired lines past 80 columns.
+  const numW = Math.max(...pgaRows.map((_r, i) => `${i + 1}.`.length))
+  const plainLabel = (r: LiveRow) => `${labels.get(lc(r.hash)) ? `${labels.get(lc(r.hash))} ` : ''}${shortHash(r.hash)}`
+  const labelW = Math.max(...pgaRows.map((r) => plainLabel(r).length))
+  const tipW = Math.max(...pgaRows.map((r) => `${formatGwei(r.effectiveTip)} gwei`.length))
+  const left = pgaRows.map((r, i) => {
+    const c = (o.competitors?.has(lc(r.hash)) ?? false) ? ' (c)' : ''
+    return `${`${i + 1}.`.padEnd(numW)} ${plainLabel(r).padEnd(labelW)} ${`${formatGwei(r.effectiveTip)} gwei`.padStart(tipW)}${mark(r)}${c}`
+  })
   let prev: number | undefined
+  // The right side stays unpadded: its offset and gap texts vary per row, and padding them made slow-motion lines exceed 80 columns.
   const right = fcfs.map((r, i) => {
     const a = at(r)
     const gap = a === undefined ? 'no arrival data' : prev === undefined ? 'first' : `+${Math.round(a - prev)}ms`
@@ -526,11 +537,14 @@ export function formatFcfsComparison(pgaRows: readonly LiveRow[], arrivals: read
     return `${i + 1}. ${labelOf(labels, r.hash, o.competitors)} ${a === undefined ? '' : `${fmtOff(a - o.originMs)} `}(${gap})${mark(r)}`
   })
   const lw = Math.max(realHead.length, ...left.map((l) => l.length))
+  const rHead = 'FCFS order (by arrival; gap to the previous)'
+  // Two spaces between the two orders, or one when that is what keeps the paired lines within WIDTH (as `table` does).
+  const gap = lw + 2 + Math.max(rHead.length, ...right.map((r) => r.length)) <= WIDTH ? 2 : 1
   const rows = Math.max(left.length, right.length)
   const shownRows = o.maxRows !== undefined ? Math.min(rows, o.maxRows) : rows
   const lines: OutLine[] = [{ text: fit(title), kind: 'plain' }]
-  lines.push({ text: fit(`${realHead.padEnd(lw)}  FCFS order (by arrival; gap to the previous)`), kind: 'plain' })
-  for (let i = 0; i < shownRows; i++) lines.push({ text: fit(`${(left[i] ?? '').padEnd(lw)}  ${right[i] ?? ''}`.trimEnd()), kind: 'plain' })
+  lines.push({ text: fit(`${realHead.padEnd(lw)}${' '.repeat(gap)}${rHead}`), kind: 'plain' })
+  for (let i = 0; i < shownRows; i++) lines.push({ text: fit(`${(left[i] ?? '').padEnd(lw)}${' '.repeat(gap)}${right[i] ?? ''}`.trimEnd()), kind: 'plain' })
   if (shownRows < rows) lines.push({ text: `   ... ${rows - shownRows} more tx${rows - shownRows === 1 ? '' : 's'} not shown`, kind: 'plain' })
   const mineIdx = pgaRows.findIndex((r) => isMineRow(r, o.mine))
   const result: FcfsResult = { lines }

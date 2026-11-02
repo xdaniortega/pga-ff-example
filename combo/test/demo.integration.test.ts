@@ -145,7 +145,7 @@ test('demo --local --pause (stdin not a TTY): the whole story, exit 0, our tx fi
   assert.ok(arrived <= seenFF && seenFF <= done, `arrived <= seen on FF <= block done: ${arrived} ${seenFF} ${done}`)
   // The FCFS table: X first with PGA, behind the earlier-arriving competitors under FCFS.
   assert.match(ch4, /^hypothetical FCFS \(local simulator data\): round 2 of block \d+$/m)
-  assert.match(ch4, /^1\. X 0x[0-9a-f]{6} {2}1 gwei <- yours /m, 'X is first in the real order')
+  assert.match(ch4, /^1\. X 0x[0-9a-f]{6} +1 gwei <- yours /m, 'X is first in the real order (tip column padded to the round)')
   const fcfs = flat4.match(/position 1 of (\d+) with PGA \(the tip decided\); position (\d+) under FCFS/)
   assert.ok(fcfs && Number(fcfs[2]) >= 3, 'under FCFS X would sit behind the competitors that arrived first:\n' + ch4)
   assert.match(ch4, /\(c\)/)
