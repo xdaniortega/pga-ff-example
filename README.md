@@ -53,7 +53,8 @@ Every command prints each kind of line in its own style, so a projector audience
 | --- | --- | --- |
 | Sequencer internals (`[sequencer]`, `[feed]`) | magenta | `[sequencer] round 2: drained order ...` |
 | An action happening now (`==>` step) | cyan | `==> buying 1 ticket` |
-| An important step | bold, inverse | `▶ CHAPTER 4/6: ...`, `YOUR TX: PGA put us first ...` |
+| A section headline | bold, inverse grey (full terminal width on a TTY) | `▶ CHAPTER 4/6: ...`, `WHAT OTHERS SEE WITHOUT FAST FEED` |
+| Your result callout | bold, inverse cyan (text width only) | `YOUR TX: ...`, the chapter-4 lesson lines, `Mine: ...` |
 | An explanation that is not an action | starts with `NOTE:`, yellow | `NOTE: a ticket bought in round N is active in round N+1 only` |
 | A warning (a flag that will not be honoured, a risky override), on stdout | starts with `WARNING:`, bold yellow | `WARNING: you requested FIFO, but a simulator is already running with PGA ...` |
 | Tables (feed rows, timelines, the matrix) | default colour; your own rows bold | `>> 0  0xf39F…2266 ...` |

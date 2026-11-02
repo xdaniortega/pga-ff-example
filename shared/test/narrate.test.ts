@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  color, colorEnabled, error, feedServer, important, internal, note, noteLines, noteText, warn, warnText, PALETTE, plain, RESET, result, sequencerAlways, setInternalVisible, step, style, verdictKind, verdictOfCode,
+  color, colorEnabled, error, feedServer, important, importantBar, internal, note, noteLines, noteText, warn, warnText, PALETTE, plain, RESET, result, sequencerAlways, setInternalVisible, step, style, verdictKind, verdictOfCode, yours,
 } from '../narrate.ts'
 
 test('colorEnabled: TTY and non-TTY with no variables', () => {
@@ -64,7 +64,7 @@ test('style and color: the exact codes, and no codes unless enabled', () => {
   assert.equal(color('step', '', true), '', 'an empty line gets no escapes')
   assert.deepEqual(
     { ...PALETTE },
-    { internal: '\x1b[35m', step: '\x1b[36m', important: '\x1b[1;7m', note: '\x1b[33m', warn: '\x1b[1;33m', pass: '\x1b[1;32m', fail: '\x1b[1;31m', inconclusive: '\x1b[1;33m', error: '\x1b[31m', bold: '\x1b[1m' },
+    { internal: '\x1b[35m', step: '\x1b[36m', important: '\x1b[1;7m', yours: '\x1b[1;7;36m', note: '\x1b[33m', warn: '\x1b[1;33m', pass: '\x1b[1;32m', fail: '\x1b[1;31m', inconclusive: '\x1b[1;33m', error: '\x1b[31m', bold: '\x1b[1m' },
   )
 })
 
@@ -73,7 +73,8 @@ test('printers, colour forced on: prefix and style of each kind', () => {
   const r = capture(() => {
     step('buying 1 ticket')
     note('a ticket bought in round N is active in round N+1 only')
-    important('YOUR TX: idx 0')
+    important('▶ CHAPTER 1/6: headline')
+    yours('YOUR TX: idx 0')
     internal('round 2: drained order')
     sequencerAlways('FEED RECEIPT MISMATCH block 3', true)
     feedServer('round ended')
@@ -87,7 +88,8 @@ test('printers, colour forced on: prefix and style of each kind', () => {
   assert.deepEqual(r.out, [
     `\x1b[36m==> buying 1 ticket${RESET}`,
     `\x1b[33m\x1b[1mNOTE:${RESET}\x1b[33m a ticket bought in round N is active in round N+1 only${RESET}`,
-    `\x1b[1;7mYOUR TX: idx 0${' '.repeat(80 - 'YOUR TX: idx 0'.length)}${RESET}`,
+    `\x1b[1;7m▶ CHAPTER 1/6: headline${' '.repeat(80 - '▶ CHAPTER 1/6: headline'.length)}${RESET}`,
+    `\x1b[1;7;36mYOUR TX: idx 0${RESET}`,
     `\x1b[35m[sequencer] round 2: drained order${RESET}`,
     `\x1b[31m[sequencer] FEED RECEIPT MISMATCH block 3${RESET}`,
     `\x1b[35m[feed] round ended${RESET}`,
@@ -97,6 +99,13 @@ test('printers, colour forced on: prefix and style of each kind', () => {
     `\x1b[1;33mINCONCLUSIVE x${RESET}`,
   ])
   assert.deepEqual(r.err, [`\x1b[31m401: no active ticket${RESET}`])
+})
+
+test('importantBar: pads to the terminal width when colour is on (not capped at 80); plain when off', () => {
+  assert.equal(importantBar('hi', false, 120), 'hi')
+  assert.equal(importantBar('hi', true, 12), 'hi' + ' '.repeat(10))
+  assert.equal(importantBar('hi', true, undefined), 'hi' + ' '.repeat(78), 'no columns: fall back to IMPORTANT_BAR_COLS')
+  assert.equal(importantBar('already-long-enough!!', true, 12), 'already-long-enough!!')
 })
 
 test('printers, colour off (non-TTY, or NO_COLOR even with FORCE_COLOR): plain text, same prefixes', () => {

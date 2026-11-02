@@ -227,7 +227,7 @@ test('E3 story lines: the slowed-down NOTE is the presenter sentence and the sea
 
 test('E3 formatRound2Lesson: at most two sentences, only for X observed in round 2; FIFO never says the tip ranked anything', () => {
   const lesson = formatRound2Lesson({ ordering: 'pga', inRound2: true, round1: ['A', 'B', 'C'], round1Total: 3, round2: ['D', 'E'], round2Total: 2 })
-  assert.ok(lesson.length <= 4 && lesson.every((l) => l.kind === 'important') && maxCols(lesson) <= 80)
+  assert.ok(lesson.length <= 4 && lesson.every((l) => l.kind === 'yours') && maxCols(lesson) <= 80)
   const f = flat(lesson)
   assert.match(f, /A, B and C were already final when you sent X: nothing you send goes before them\./)
   assert.match(f, /In round 2 you competed blind: X was ranked by tip against D and E\./)

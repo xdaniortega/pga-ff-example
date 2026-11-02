@@ -12,10 +12,10 @@ import { wrapText } from './scenarios.ts'
 
 export const WIDTH = 80
 
-/** A printed line and its palette kind: `note` lines start with `NOTE:`, `important` lines are highlighted, `plain` is data. */
+/** A printed line and its palette kind: `note` lines start with `NOTE:`, `important` is a grey headline bar, `yours` is the cyan "your result" bar, `plain` is data. */
 export interface OutLine {
   text: string
-  kind: 'plain' | 'note' | 'important'
+  kind: 'plain' | 'note' | 'important' | 'yours'
   /** F6: a Fast Feed table row that is shown for the first time (the demo reveals such rows one by one on a terminal; see pacing.ts). */
   row?: true
 }
@@ -86,7 +86,7 @@ export function sealedLine(block: number): string {
 }
 
 const noteOf = (text: string): OutLine[] => wrapText(`NOTE: ${text.replace(/^\s*NOTE:\s*/, '')}`, WIDTH, '      ').map((t) => ({ text: t, kind: 'note' as const }))
-const importantOf = (text: string): OutLine[] => wrapText(text, WIDTH).map((t) => ({ text: t, kind: 'important' as const }))
+const yoursOf = (text: string): OutLine[] => wrapText(text, WIDTH).map((t) => ({ text: t, kind: 'yours' as const }))
 
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWYZ' // no X: X is always "your tx"
 
@@ -583,9 +583,9 @@ export function formatRound2Lesson(i: { ordering: 'pga' | 'fifo'; inRound2: bool
   const out: OutLine[] = []
   if (i.round1Total > 0) {
     const one = i.round1Total === 1
-    out.push(...importantOf(`${nameList(i.round1, i.round1Total)} ${one ? 'was' : 'were'} already final when you sent X: nothing you send goes before ${one ? 'it' : 'them'}.`))
+    out.push(...yoursOf(`${nameList(i.round1, i.round1Total)} ${one ? 'was' : 'were'} already final when you sent X: nothing you send goes before ${one ? 'it' : 'them'}.`))
   }
-  if (i.round2Total === 0) out.push(...importantOf(`X had no competitors in round 2, so ${i.ordering === 'fifo' ? 'arrival' : 'the tip'} decided nothing there.`))
-  else out.push(...importantOf(`In round 2 you competed blind: X was ${i.ordering === 'fifo' ? `ordered by arrival among ${nameList(i.round2, i.round2Total)}, not by tip (FIFO)` : `ranked by tip against ${nameList(i.round2, i.round2Total)}`}.`))
+  if (i.round2Total === 0) out.push(...yoursOf(`X had no competitors in round 2, so ${i.ordering === 'fifo' ? 'arrival' : 'the tip'} decided nothing there.`))
+  else out.push(...yoursOf(`In round 2 you competed blind: X was ${i.ordering === 'fifo' ? `ordered by arrival among ${nameList(i.round2, i.round2Total)}, not by tip (FIFO)` : `ranked by tip against ${nameList(i.round2, i.round2Total)}`}.`))
   return out
 }

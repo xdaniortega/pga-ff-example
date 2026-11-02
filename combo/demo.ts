@@ -16,7 +16,7 @@ import { connectFeed, FeedRejectedError, rejectionLines, closeLines, type FeedCl
 import { generateKey } from '../fast-feed/client/key.ts'
 import { decodeLiveRow, FOOTER, fmtGwei, formatPanel, formatTable, groupRows, LiveRounds, myAddresses, shortAddr, waitBlockVisible, type LiveOptions, type LiveRow } from '../fast-feed/client/live.ts'
 import { chainNowMs, freezeChainClock, setChainClock, thawChainClock } from '../shared/clock.ts'
-import { colorEnabled, error, important, note, noteLines, plain, result, step, style } from '../shared/narrate.ts'
+import { colorEnabled, error, important, note, noteLines, plain, result, step, style, yours } from '../shared/narrate.ts'
 import { DEAD, gwei, sleep, type Verdict } from '../pga/bot/common.ts'
 import { presign } from '../pga/bot/tx.ts'
 import {
@@ -1161,12 +1161,16 @@ function wstep(text: string): void {
 function wimportant(text: string): void {
   for (const l of wrapText(text, WIDTH)) important(l)
 }
+function wyours(text: string): void {
+  for (const l of wrapText(text, WIDTH)) yours(l)
+}
 
-/** Print formatter output in the palette: notes in the note colour (already `NOTE:`-prefixed), important lines highlighted. */
+/** Print formatter output in the palette: notes in the note colour (already `NOTE:`-prefixed), grey headlines vs cyan "your" bars. */
 function printOut(lines: readonly OutLine[]): void {
   for (const l of lines) {
     if (l.kind === 'note') noteLines([l.text])
     else if (l.kind === 'important') important(l.text)
+    else if (l.kind === 'yours') yours(l.text)
     else plain(l.text)
   }
 }
@@ -1596,7 +1600,7 @@ async function roundTwoAttempt(st: State, io: { prompt?: () => Promise<void> }, 
     const r2Others = hashesOf(roundOf(rowsN, 2)).filter((h) => h.toLowerCase() !== ours.hash.toLowerCase())
     later(() => {
       // 1. the highlighted line
-      wimportant(yourTxLine({ block: x.blockNumber, round: x.pgaRound, indexInRound: indexWithinRound(xRows, x), inRound: xRows.length, tipGwei }))
+      wyours(yourTxLine({ block: x.blockNumber, round: x.pgaRound, indexInRound: indexWithinRound(xRows, x), inRound: xRows.length, tipGwei }))
       if (j.verdict !== 'INCONCLUSIVE' || inRound2) {
         // 2. the two short tables, after the block closed
         printOut(formatTimingTable(rowsN, [...arrivals1, ...arrivals2], visibleOf(B), opts))
@@ -1607,7 +1611,7 @@ async function roundTwoAttempt(st: State, io: { prompt?: () => Promise<void> }, 
       printOut(formatRound2Lesson({ ordering: params.ordering, inRound2, round1: letters(r1Others), round1Total: r1Others.length, round2: letters(r2Others), round2Total: r2Others.length }))
       // Observed: the first sentence repeats the highlighted line above; only what it adds (the feed lead) follows.
       const verdict = j.observed ? j.lines.slice(1) : j.lines
-      if (verdict.length > 0) (j.observed ? wimportant : wnote)(j.observed ? `YOUR TX: ${verdict.join(' ')}` : verdict.join(' '))
+      if (verdict.length > 0) (j.observed ? wyours : wnote)(j.observed ? `YOUR TX: ${verdict.join(' ')}` : verdict.join(' '))
     })
     return { judgement: j, leadMs: lead }
   } finally {
@@ -1864,7 +1868,7 @@ async function chapter5(st: State, io: { prompt?: () => Promise<void> } = {}): P
     }
     st.race = { input: trial.input, judgement: trial.judgement, verdict }
     const rank = (b: RaceInput['mine']) => `${b.name} rank ${b.rank} (${b.landed ? `block ${b.landed.block} round ${b.landed.pgaRound ?? '?'}` : 'block ?'}, tx_index ${b.landed?.index ?? '?'}, tip ${b.landed ? gwei(b.landed.tip) : '?'} gwei)`
-    important(`YOUR TX: ranks: ${rank(trial.input.mine)}; ${rank(trial.input.rival)}`)
+    yours(`YOUR TX: ranks: ${rank(trial.input.mine)}; ${rank(trial.input.rival)}`)
     if (raceExitCode(verdict) === 1) throw new Error(`the race FAILED: ${trial.reason.split('\n')[0]}`)
   } finally {
     await endHold(st).catch(() => {}) // never leave the simulator held (also after an error); the lease is the backstop
@@ -2069,7 +2073,7 @@ async function main(): Promise<number> {
       recap(st)
       plain()
       for (const f of failures) result('FAIL', `FAILED: chapter ${f.chapter} (${CHAPTERS[f.chapter - 1]!.title}): ${f.what}`)
-      important(whyLine(st.race?.input, st.race?.judgement))
+      yours(whyLine(st.race?.input, st.race?.judgement))
     })
     return interrupted ? 130 : demoExitCode(failures, st.race?.verdict)
   } finally {
