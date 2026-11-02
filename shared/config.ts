@@ -35,7 +35,7 @@ export const ARBITRUM_ONE = {
   blockFull: '32 Mgas / 95 kB calldata per block',
 } as const
 
-/** Payment token decimals: USDG on Arbitrum One, TEST on Arbitrum Sepolia and locally all use 6. */
+/** Payment token decimals: USDG on Arbitrum One, the Arbitrum Sepolia test token and the local USDGTest all use 6. */
 export const TOKEN_DECIMALS = 6
 
 // Public Anvil dev keys (printed by `anvil`, anyone can spend from them: LOCAL ONLY).
@@ -90,6 +90,11 @@ export const ANVIL_ACCOUNT_MAP = {
    * They are flooders, idle during the demo (the flood and the demo never run together).
    */
   demoCompetitors: [3, 4, 5],
+  /**
+   * F3 (`npm run demo`, chapter 5): "other users" whose lower-tip txs fill the race's two blocks so the tables are not 1-2 rows.
+   * Flooders, idle during the demo (the flood and the demo never run together).
+   */
+  raceExtras: [3, 4, 5, 6],
 } as const
 
 /** The private key of a local Anvil dev account (public mnemonic: LOCAL ONLY). */
@@ -226,7 +231,7 @@ const LOCAL_TICKET_DEFAULTS: LocalTicketParams = {
   roundSeconds: LOCAL_TICKET_ROUND_DEFAULT_S,
   targetTicketsPerRound: 100,
   maxTicketsPerRound: 200,
-  minimumPrice: 1_000_000n, // 1 TEST
+  minimumPrice: 1_000_000n, // 1 USDGTest
   priceUpdateFraction: 144,
   grandfatherPeriodFraction: 0,
   firstRoundLeadSeconds: 3,
@@ -470,7 +475,7 @@ export function localParamsFromJson(j: LocalParamsJson): LocalParams {
 }
 
 /**
- * For the local preset the Tickets / TEST addresses exist only after the stack deployed them, so
+ * For the local preset the Tickets / USDGTest addresses exist only after the stack deployed them, so
  * ask the running stack (`sim_info`) and return the preset with them filled in, plus the stack's
  * own parameters (its ticket round length may differ from our env). The testnet preset already
  * has fixed addresses and is returned unchanged.

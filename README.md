@@ -39,7 +39,7 @@ Both build the contracts, start the stack (or attach to a running `npm run sim`)
 | 5. The race | a feed-driven claim with a bigger tip against a polling rival |
 | 6. Recap | what the Fast Feed did, what PGA did, then `Mine: rank 1. Why: ...` |
 
-- **Run time:** an activation wait of up to one ticket round (30s by default), then about 30s of chapters hands-off, several minutes with `--pause`.
+- **Run time:** on a stack the demo starts itself, the ticket's activation costs no wait once the purchase has landed (the purchase needs about 4 blocks, about 8s by default); against an attached `npm run sim` the demo waits up to one ticket round (30s by default); then about 30s of chapters hands-off, several minutes with `--pause`.
 - **Exit codes:** 0 every chapter matched; 1 a chapter failed (the output names it); 2 usage; 3 the race was inconclusive after its retry; 130 Ctrl-C.
 - **`--testnet`** is refused for now.
 
@@ -73,7 +73,7 @@ sim/         the shared local stack: Anvil, mock sequencer and RPC proxy, deploy
 fast-feed/   the Fast Feed alone: client/ (CLI, live view, tickets, keys) and mock/ (local feed and auth)
 pga/         PGA alone: rules/ (the ordering, pure), bot/ (scenarios, flood, probe), scripts/demo.sh
 combo/       both together: the race (S1-S3, matrix), the narrated demo, pga:slot
-contracts/   Solidity: vendored Tickets, local TEST token, the Race contract (Foundry)
+contracts/   Solidity: vendored Tickets, local USDGTest token, the Race contract (Foundry)
 docs/        setup.md: install, .env, wallets, ports
 ```
 

@@ -77,7 +77,7 @@ test('banner prints the ticket round actually used', () => {
   assert.equal(stack.params.tickets.roundSeconds, 12)
 })
 
-test('local stack deployed TEST + Tickets and is past the first round (views do not revert)', async () => {
+test('local stack deployed USDGTest + Tickets and is past the first round (views do not revert)', async () => {
   const r = await readRound(ctx)
   assert.ok(r.round >= 0n)
   assert.equal(r.price, 1_000_000n)
@@ -170,14 +170,14 @@ test('stale round or wrong price gives a readable error, not a stack trace', asy
   const r2 = await readRound(ctx)
   await assert.rejects(purchase(ctx, { ...r2, price: r2.price + 1n }, 1, KEY_HASH), (e) => {
     const msg = formatTicketsError(e)
-    assert.match(msg, /^Ticket price changed \(expected 1\.000001 TEST, now 1 TEST\)/)
+    assert.match(msg, /^Ticket price changed \(expected 1\.000001 USDGTest, now 1 USDGTest\)/)
     assert.doesNotMatch(msg, /\n\s+at |Error:|Details:/)
     return true
   })
-  // Not enough deposited TEST: everything was spent on the ticket above.
+  // Not enough deposited USDGTest: everything was spent on the ticket above.
   const r3 = await readRound(ctx)
   await assert.rejects(purchase(ctx, r3, 1, KEY_HASH), (e) => {
-    assert.match(formatTicketsError(e), /Not enough deposited TEST \(deposited 0 TEST, needed 1 TEST\)/)
+    assert.match(formatTicketsError(e), /Not enough deposited USDGTest \(deposited 0 USDGTest, needed 1 USDGTest\)/)
     return true
   })
 })

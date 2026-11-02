@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { encodeErrorResult } from 'viem'
-import { localParams } from '../../shared/config.ts'
+import { localParams, TESTNET_PRESET } from '../../shared/config.ts'
 import { erc20Abi, ticketsAbi } from '../client/abi.ts'
 import { accessFor, activeTickets, pendingTickets } from '../client/access.ts'
 import { apiKeyHash, generateKey, writeEnvKey } from '../client/key.ts'
-import { checkGrandfather, explainRevert, formatRevertData, formatTicketsError, purchaseRoomDecision, UserError, type RoundInfo } from '../client/tickets.ts'
+import { checkGrandfather, tokenLabelFor, makeCtx, fmtToken, explainRevert, formatRevertData, formatTicketsError, purchaseRoomDecision, UserError, type RoundInfo } from '../client/tickets.ts'
 import { resolveBin } from '../../sim/chain.ts'
 import { bannerLines, ticketSummaryLine } from '../../sim/banner.ts'
 import { bearerKey } from '../mock/feed.ts'
@@ -84,10 +84,10 @@ test('explainRevert: every Tickets custom error has a readable message', () => {
     explainRevert('RoundNumberMismatch', [3n, 4n]),
     'Round changed (expected 3, now 4): the round rolled over between read and purchase; rerun the command.',
   )
-  assert.match(explainRevert('IncorrectTicketPrice', [1_000_000n, 2_000_000n])!, /Ticket price changed \(expected 1 TEST, now 2 TEST\)/)
+  assert.match(explainRevert('IncorrectTicketPrice', [1_000_000n, 2_000_000n])!, /Ticket price changed \(expected 1 USDGTest, now 2 USDGTest\)/)
   assert.match(explainRevert('ZeroTicketsRequested')!, /0 tickets/)
   assert.match(explainRevert('MaxTicketsSold')!, /sold out/)
-  assert.match(explainRevert('InsufficientTokenBalance', [0n, 1_500_000n])!, /deposited 0 TEST, needed 1.5 TEST/)
+  assert.match(explainRevert('InsufficientTokenBalance', [0n, 1_500_000n])!, /deposited 0 USDGTest, needed 1.5 USDGTest/)
   assert.match(explainRevert('NotEnoughGrandfatheredTickets', [1n, 2n])!, /hold 1 grandfathered .* asked for 2/)
   assert.match(explainRevert('BeforeFirstRoundStart')!, /first ticket round/)
   assert.equal(explainRevert('SomethingElse'), undefined)
@@ -99,7 +99,7 @@ test('formatRevertData: decodes raw revert data through the ABI for each custom 
     ['IncorrectTicketPrice', [1n, 2n], /Ticket price changed/],
     ['ZeroTicketsRequested', [], /0 tickets/],
     ['MaxTicketsSold', [], /sold out/],
-    ['InsufficientTokenBalance', [5n, 9n], /Not enough deposited TEST/],
+    ['InsufficientTokenBalance', [5n, 9n], /Not enough deposited USDGTest/],
     ['NotEnoughGrandfatheredTickets', [0n, 1n], /Grandfather period/],
     ['BeforeFirstRoundStart', [], /not started/],
   ]
@@ -127,7 +127,7 @@ test('banner reports every accelerated ticket parameter next to its Arbitrum One
   const text = bannerLines(p).join('\n')
   assert.match(text, /ticket round = 9s \(Arbitrum One: 24h\)/)
   assert.match(text, /target 100, max 200 {3}\(Arbitrum One: 100, 200\)/)
-  assert.match(text, /minimum ticket price = 1000000 units = 1 TEST.*17000000 units = \$17/)
+  assert.match(text, /minimum ticket price = 1000000 units = 1 USDGTest.*17000000 units = \$17/)
   assert.match(text, /price update fraction = 144 {3}\(Arbitrum One: 144\)/)
   assert.match(text, /Fast Feed auth: OFF/)
   assert.match(bannerLines(localParams('slow', {})).join('\n'), /Fast Feed auth: ON/)
@@ -147,7 +147,7 @@ test('checkGrandfather: applies only when round > 0 (as Tickets.sol), with a one
 test('InsufficientTokenBalance advice depends on the context (purchase vs withdraw)', () => {
   assert.match(explainRevert('InsufficientTokenBalance', [1_000_000n, 2_000_000n], 'purchase')!, /deposit more/)
   const w = explainRevert('InsufficientTokenBalance', [1_000_000n, 2_000_000n], 'withdraw')!
-  assert.match(w, /You only have 1 TEST deposited/)
+  assert.match(w, /You only have 1 USDGTest deposited/)
   assert.doesNotMatch(w, /deposit more/)
 })
 
@@ -187,4 +187,21 @@ test('E2: a receipt wait that times out while the demo holds the simulator pause
   setChainClock(Date.now()) // resumed
   assert.deepEqual(await p, { status: 'success' })
   resetChainClock()
+})
+
+test('F4: the token label is USDGTest locally and claims no symbol on Sepolia', () => {
+  assert.equal(tokenLabelFor('local'), 'USDGTest')
+  assert.equal(tokenLabelFor('testnet'), 'tokens')
+})
+
+test('F4: makeCtx for a testnet preset switches amounts to "tokens", a local one back to USDGTest (no network access)', () => {
+  const env = { PRIVATE_KEY: '0x' + '11'.repeat(32) }
+  try {
+    makeCtx(TESTNET_PRESET, env)
+    assert.equal(fmtToken(1_500_000n), '1.5 tokens')
+    makeCtx({ ...TESTNET_PRESET, mode: 'local' }, env)
+    assert.equal(fmtToken(1_500_000n), '1.5 USDGTest')
+  } finally {
+    makeCtx({ ...TESTNET_PRESET, mode: 'local' }, env)
+  }
 })

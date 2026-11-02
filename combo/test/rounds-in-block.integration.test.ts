@@ -98,7 +98,7 @@ before(async () => {
   })
   await client.ready
 
-  // Setup (any rounds): give account 0 TEST to be pulled later. Wait for the receipt (block visible), then forget these messages.
+  // Setup (any rounds): give account 0 USDGTest to be pulled later. Wait for the receipt (block visible), then forget these messages.
   const mintHash = await send(await sign(0, { to: token, data: encodeFunctionData({ abi: ERC20, functionName: 'mint', args: [privateKeyToAccount(anvilDevKey(0)).address, 1000n] }), tip: '0.001' }))
   await receiptOf(mintHash)
   await sleep(300)

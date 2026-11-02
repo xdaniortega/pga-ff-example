@@ -31,7 +31,14 @@ import { erc20Abi, ticketsAbi } from './abi.ts'
 /** A problem the user can fix: printed as one line, exit status 1, no stack trace. */
 export class UserError extends Error {}
 
-export const fmtToken = (units: bigint): string => `${formatUnits(units, TOKEN_DECIMALS)} TEST`
+/**
+ * How amounts and prose name the payment token: the local one is USDGTest; on Arbitrum Sepolia the token is whatever test token that
+ * network provides, so no symbol is claimed ("tokens"). Set from the preset's mode by `makeCtx` (default: local).
+ */
+let tokenLabel = 'USDGTest'
+export const tokenName = (): string => tokenLabel
+export const tokenLabelFor = (mode: Preset['mode']): string => (mode === 'local' ? 'USDGTest' : 'tokens')
+export const fmtToken = (units: bigint): string => `${formatUnits(units, TOKEN_DECIMALS)} ${tokenLabel}`
 /** Chain time in seconds (E2: the local simulator's clock can lag or lead the wall clock; elsewhere it is the wall clock). */
 export const nowSec = (): number => chainNowSec()
 /** `2026-01-01T00:00:00.000Z (in 12s)` / `(3s ago)`. Chain time is the wall clock on Arbitrum; locally the simulator may have paused or skipped it (shared/clock.ts). */
@@ -56,13 +63,14 @@ export interface TicketsCtx {
 
 /** `preset` must be resolved (see resolvePreset in config.ts): local addresses exist only at runtime. */
 export function makeCtx(preset: Preset, env: NodeJS.ProcessEnv = process.env): TicketsCtx {
-  if (!preset.ticketsProxy || !preset.testToken) throw new ConfigError('Tickets / TEST addresses are not known for this preset.')
+  if (!preset.ticketsProxy || !preset.testToken) throw new ConfigError('Tickets / payment token addresses are not known for this preset.')
   const chain: Chain = {
     id: preset.chainId,
     name: preset.name,
     nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
     rpcUrls: { default: { http: [preset.rpcUrl] } },
   }
+  tokenLabel = tokenLabelFor(preset.mode)
   const account = privateKeyToAccount(walletKey(preset, env)) // key never printed
   return {
     preset,
@@ -103,18 +111,18 @@ const read = <T>(ctx: TicketsCtx, address: Address, abi: typeof ticketsAbi | typ
   ctx.pub.readContract({ address, abi, functionName, args } as never) as Promise<T>
 
 /**
- * LOCAL ONLY: mint TEST to the wallet. The local TestToken has a public `mint`. On Arbitrum Sepolia the
- * TEST token is minted by Offchain Labs (ask on Discord), so this prints a hint and does nothing.
+ * LOCAL ONLY: mint USDGTest to the wallet. The local TestToken has a public `mint`. On Arbitrum Sepolia the
+ * test token is minted by Offchain Labs (ask on Discord), so this prints a hint and does nothing.
  * This is the ONLY place feature code branches on the network.
  */
 export async function mintLocal(ctx: TicketsCtx, amount: bigint): Promise<void> {
   if (ctx.preset.mode !== 'local') {
-    note('Mint skipped: on Arbitrum Sepolia, TEST comes from Offchain Labs (ask via Discord); you cannot mint it.')
+    note('Mint skipped: on Arbitrum Sepolia, the test token comes from Offchain Labs (ask via Discord); you cannot mint it.')
     return
   }
   if (!ctx.quiet) {
     step(`mint ${fmtToken(amount)} to ${ctx.account.address} `)
-    note('Local only: the local TEST token has a public mint.')
+    note('Local only: the local USDGTest token has a public mint.')
   }
   const hash = await ctx.wallet.writeContract({ address: ctx.token, abi: erc20Abi, functionName: 'mint', args: [ctx.account.address, amount], chain: undefined, account: ctx.account })
   await confirm(ctx, hash, 'mint')
@@ -241,7 +249,7 @@ export async function purchase(ctx: TicketsCtx, r: RoundInfo, numTickets: number
   return { hash, round: r.round, filled: ev?.args.numTickets ?? BigInt(numTickets), price: ev?.args.price ?? r.price, accessStart: r.roundEnd }
 }
 
-/** Quiet balance read: wallet TEST and deposited TEST. */
+/** Quiet balance read: wallet and deposited tokens. */
 export async function balances(ctx: TicketsCtx): Promise<{ wallet: bigint; deposited: bigint }> {
   const [wallet, deposited] = await Promise.all([
     read<bigint>(ctx, ctx.token, erc20Abi, 'balanceOf', [ctx.account.address]),
@@ -284,7 +292,7 @@ export async function status(ctx: TicketsCtx, keyHash?: Hex): Promise<Status> {
   if (keyHash) ({ access, purchases } = await readKeyAccess(ctx, keyHash, info.round))
   const s: Status = { walletBalance, deposited, info, thisRound, access }
   step(`status for ${ctx.account.address}`)
-  plain(`  wallet TEST balance:   ${fmtToken(walletBalance)}`)
+  plain(`  wallet ${tokenName()} balance:   ${fmtToken(walletBalance)}`)
   plain(`  deposited balance:     ${fmtToken(deposited)}`)
   plain(`  round:                 ${info.round}`)
   plain(`  ticket price:          ${fmtToken(info.price)}`)
@@ -339,7 +347,7 @@ export async function withdraw(ctx: TicketsCtx, amount?: bigint): Promise<bigint
     read<bigint>(ctx, ctx.tickets, ticketsAbi, 'tokenBalance', [ctx.account.address]),
     read<bigint>(ctx, ctx.token, erc20Abi, 'balanceOf', [ctx.account.address]),
   ])
-  important(`  withdrew ${fmtToken(amt)}; deposited balance now ${fmtToken(after)}; wallet TEST balance ${fmtToken(wallet)}`)
+  important(`  withdrew ${fmtToken(amt)}; deposited balance now ${fmtToken(after)}; wallet ${tokenName()} balance ${fmtToken(wallet)}`)
   return amt
 }
 
@@ -363,15 +371,15 @@ export function explainRevert(name: string, args: readonly unknown[] = [], conte
       if (context === 'withdraw') {
         return `You only have ${fmtToken(a[0]!)} deposited, so you cannot withdraw ${fmtToken(a[1]!)}: pass a smaller --amount, or omit --amount to withdraw everything.`
       }
-      return `Not enough deposited TEST (deposited ${fmtToken(a[0]!)}, needed ${fmtToken(a[1]!)}): deposit more (tickets:buy does this for you) or ask for a smaller amount.`
+      return `Not enough deposited ${tokenName()} (deposited ${fmtToken(a[0]!)}, needed ${fmtToken(a[1]!)}): deposit more (tickets:buy does this for you) or ask for a smaller amount.`
     case 'NotEnoughGrandfatheredTickets':
       return `Grandfather period: you hold ${a[0]} grandfathered ticket(s) but asked for ${a[1]}. Only holders of previous-round tickets may buy now; retry after the grandfather period ends.`
     case 'BeforeFirstRoundStart':
       return 'The first ticket round has not started yet: wait a few seconds and rerun.'
     case 'ERC20InsufficientAllowance':
-      return 'The Tickets contract is not approved to pull enough TEST: run the approve step first.'
+      return `The Tickets contract is not approved to pull enough ${tokenName()}: run the approve step first.`
     case 'ERC20InsufficientBalance':
-      return `Wallet TEST balance too low (have ${fmtToken(a[1]!)}, need ${fmtToken(a[2]!)}).`
+      return `Wallet ${tokenName()} balance too low (have ${fmtToken(a[1]!)}, need ${fmtToken(a[2]!)}).`
     default:
       return undefined
   }

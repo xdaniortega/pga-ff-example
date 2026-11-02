@@ -1,7 +1,7 @@
 // `npm run tickets:buy|tickets:status|tickets:withdraw -- --local|--testnet [options]`
 //   buy       [--tickets N]    mint (local) -> approve -> deposit -> read round/price -> purchase
 //   status                     wallet, deposit, round, price, tickets, key access
-//   withdraw  [--amount TEST]  take the deposit (all, or an amount) back to the wallet
+//   withdraw  [--amount <tokens>]  take the deposit (all, or an amount) back to the wallet
 // Concepts: fast-feed/README.md
 import { parseUnits } from 'viem'
 import { envFilePath, feedApiKey, getPreset, loadDotEnv, resolvePreset, TOKEN_DECIMALS } from '../../shared/config.ts'

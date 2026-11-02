@@ -11,7 +11,7 @@ test('compact banner: every differing local value is in the table, next to its A
   const t = compactBanner(p).table.join('\n')
   for (const needle of [
     '2s', '250ms', '1s', '125ms', '0.01 gwei pinned', String(p.chainId), '42161', `${p.tickets.roundSeconds}s`, '24h', 'grandfather', '~0.5',
-    '100 / 200', '1 TEST', '$17', 'price update fraction', '144', 'TEST (public mint)', 'USDG', '50ms', 'Fast Feed auth', 'ON (ticket needed)',
+    '100 / 200', '1 USDGTest', '$17', 'price update fraction', '144', 'USDGTest', 'USDG', '50ms', 'Fast Feed auth', 'ON (ticket needed)',
     '10 rounds', 'none', '32 Mgas / 95 kB', `http://${p.host}:${p.rpcPort}`, `ws://${p.host}:${p.feedPort}`, p.anvilUrl,
   ]) assert.ok(t.includes(needle), `missing ${needle}:\n${t}`)
   assert.match(t, /^parameter +local +Arbitrum One$/m)

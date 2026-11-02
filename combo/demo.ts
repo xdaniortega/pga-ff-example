@@ -16,7 +16,7 @@ import { connectFeed, FeedRejectedError, rejectionLines, closeLines, type FeedCl
 import { generateKey } from '../fast-feed/client/key.ts'
 import { decodeLiveRow, FOOTER, fmtGwei, formatPanel, formatTable, groupRows, LiveRounds, myAddresses, shortAddr, waitBlockVisible, type LiveOptions, type LiveRow } from '../fast-feed/client/live.ts'
 import { chainNowMs, freezeChainClock, setChainClock, thawChainClock } from '../shared/clock.ts'
-import { colorEnabled, error, important, note, noteLines, plain, result, setInternalVisible, step, style } from '../shared/narrate.ts'
+import { colorEnabled, error, important, note, noteLines, plain, result, step, style } from '../shared/narrate.ts'
 import { DEAD, gwei, sleep, type Verdict } from '../pga/bot/common.ts'
 import { presign } from '../pga/bot/tx.ts'
 import {
@@ -31,16 +31,21 @@ import {
   WIDTH,
   blockHeaderLine,
   formatBlockComparison,
+  formatComparisonStage,
+  formatSequencerSummary,
   comparisonSkipNote,
   roundHeaderLine,
   sealedLine,
   SLOWED_NOTE,
   yourTxLine,
   type ArrivalRec,
+  type BlockComparisonInput,
   type OutLine,
   type Round2Judgement,
 } from './round2.ts'
-import { newIdentity, buyTickets, minRoundLeftS, currentRoundEnd, readTicketRound, renewDecision, renewTickets, ticketsUsable, type BotIdentity, type TicketSession } from './race.ts'
+import { RaceStager } from './stages.ts'
+import { PACING_NOTE, RowPacer, rowPacingEnabled } from './pacing.ts'
+import { newIdentity, buyTickets, currentRoundEnd, readTicketRound, renewDecision, renewTickets, ticketsUsable, type BotIdentity, type TicketSession } from './race.ts'
 import {
   DEFAULT_POLL_MS,
   makeRaceContext,
@@ -84,7 +89,7 @@ export function chapterHeader(c: Chapter): string[] {
 
 export const USAGE = 'Usage: npm run demo -- --local [--pause] [--preset slow|fast]   (--pause waits for Enter between chapters; --testnet comes with the testnet stage)'
 export const TESTNET_REFUSAL =
-  'Error: the testnet demo is the testnet stage (C4): needs funded wallets, TEST tickets and `race:deploy -- --testnet`. Nothing was run. Use --local.'
+  'Error: the testnet demo is the testnet stage (C4): needs funded wallets, tickets and `race:deploy -- --testnet`. Nothing was run. Use --local.'
 
 export interface DemoArgs {
   mode: 'local' | 'testnet'
@@ -224,12 +229,13 @@ export function originAfterPauses(originMs: number, measuredAt: number, pauses: 
 export const HOLD_LEASE_MS = 15_000
 /** The one NOTE the first time the simulator is paused. */
 export const PAUSE_NOTE = 'the simulator is paused while you talk (local only; Arbitrum never pauses): no PGA rounds, no blocks, no traffic, and the ticket clock stands still. It continues in the same ticket round when you press Enter.'
-export const SKIP_NOTE = 'LOCAL: skipping the simulator clock to the next ticket round (on Arbitrum One you would wait for the next round)'
-/** Chapter 3 skips the clock only when more than this much of the activation wait remains. */
-export const ACTIVATION_SKIP_OVER_MS = 20_000
+/** F2: the demo (on a stack it owns) skips the clock silently as soon as the purchase has landed, when more than this much of the activation wait remains. */
+export const ACTIVATION_SKIP_OVER_MS = 1_000
+/** The funding, approve, deposit and purchase of the background flow take about this many blocks (a hard limit: each step needs a mined block). */
+export const PURCHASE_BLOCKS = 4
 
 /**
- * Pure: may an Enter prompt freeze the simulator? Not while the background ticket purchase (mint, approve, deposit, purchase: a few
+ * Pure: may an Enter prompt freeze the simulator? Not while the background ticket purchase (funding, approve, deposit, purchase: a few
  * blocks) is still in flight: a frozen simulator mines nothing, so chapter 3 would wait out the whole freeze for it. Once it settled, yes.
  */
 export function shouldFreezeAtPrompt(i: { hasBackgroundTicket: boolean; backgroundSettled: boolean }): boolean {
@@ -524,6 +530,8 @@ interface State {
   /** The in-place panel of chapter 4 (a terminal only). */
   panel?: PanelRenderer
   decoding: Promise<void>
+  /** F6: reveals the rows of the Fast Feed tables one by one on a terminal (display only); aborted on Ctrl-C. */
+  pacer: RowPacer
   /** Every feed row seen since chapter 4 started (the newest 3000), for its tables. */
   rows: LiveRow[]
   leadMs?: number
@@ -611,6 +619,12 @@ export interface BackgroundTicket {
   round?: number
   /** The background purchase AND its renewal have finished (either way). */
   settled?: boolean
+  /** Wall-clock ms when the background flow started (for the landing estimate). */
+  startedAt?: number
+  /** F2: the silent clock skip to the activation time, started as soon as the purchase landed (owned stack only). Always resolves. */
+  skipped?: Promise<void>
+  /** Why the silent skip failed, if it did (nothing is printed; chapter 3 then waits for the activation). */
+  skipError?: Error
   /** The purchase is active (bought and activated); the renewal may still be running. Never rejects. */
   landed: Promise<LandedResult>
   /** Everything, the renewal included. */
@@ -619,17 +633,28 @@ export interface BackgroundTicket {
 export type LandedResult = { ok: true; session: TicketSession; round: number } | { ok: false; error: Error }
 
 /**
- * Silently buy (mint, approve, deposit, purchase) and renew the ticket while chapters 1 and 2 are read out. It never rejects:
+ * Silently fund the wallet, then buy (approve, deposit, purchase) and renew the ticket while chapters 1 and 2 are read out. It never rejects:
  * chapter 3 reports the result. A signal exits the process, so nothing here needs to be cancelled.
  */
 function startBackgroundTicket(st: State): BackgroundTicket {
-  const bg: BackgroundTicket = { landed: undefined as never, done: undefined as never }
-  bg.landed = buyTickets(st.preset, [st.mine], { quiet: true, onBought: (from, round) => { bg.activeFrom = from; bg.round = round } }).then(
+  const bg: BackgroundTicket = { landed: undefined as never, done: undefined as never, startedAt: Date.now() }
+  bg.landed = buyTickets(st.preset, [st.mine], {
+    quiet: true,
+    onBought: (from, round) => {
+      bg.activeFrom = from
+      bg.round = round
+      // F2: silent, and only on a stack the demo owns: do not wait for the activation, move the chain clock there now (the skip itself waits for a block in progress).
+      if (shouldSkipActivation({ attached: st.stack.attached, activeFromMs: from, chainNowMs: chainNowMs() })) {
+        bg.skipped = silentSkip(() => skipSimClock(st, Math.ceil(from / 1000)), (e) => { bg.skipError = e })
+      }
+    },
+  }).then(
     (bought): LandedResult => ({ ok: true, session: bought, round: bg.round ?? 0 }),
     (e): LandedResult => ({ ok: false, error: e instanceof Error ? e : new Error(String(e)) }),
   )
   // The renewal continues in the background after chapter 3 has reported the purchase (chapter 4 reports its outcome).
   bg.done = bg.landed.then(async (l): Promise<BackgroundResult> => {
+    await bg.skipped // the skip ends (and the client clock is set) before the ticket counts as settled, so a prompt hold cannot overlap it
     if (!l.ok) return l
     // Best effort: a failed renewal keeps the purchase; the refresh before chapters 4-5 rebuys later.
     const renewed = await renewTickets(st.preset, [st.mine], l.session, { quiet: true }).catch(() => undefined)
@@ -641,73 +666,108 @@ function startBackgroundTicket(st: State): BackgroundTicket {
   return bg
 }
 
+/** Pure (F2): skip the simulator clock to the activation only on a stack the demo owns and when more than ACTIVATION_SKIP_OVER_MS remain. */
+export function shouldSkipActivation(i: { attached: boolean; activeFromMs: number; chainNowMs: number }): boolean {
+  return !i.attached && i.activeFromMs - i.chainNowMs > ACTIVATION_SKIP_OVER_MS
+}
+
+/** Run a skip silently: the returned promise always resolves; a failure is handed to `record` (never printed). */
+export function silentSkip(skip: () => Promise<void>, record: (e: Error) => void): Promise<void> {
+  return skip().then(
+    () => undefined,
+    (e: unknown) => record(e instanceof Error ? e : new Error(String(e))),
+  )
+}
+
 /** Pure: the one NOTE of chapter 3 on the ticket round (config value against 24 h). */
 export function ticketRoundNoteLine(roundSeconds: number): string {
-  return `NOTE: LOCAL: a ticket round is ${roundSeconds}s here instead of 24h on Arbitrum One. A ticket bought in ticket round N is active in round N+1 only.`
+  return `NOTE: LOCAL: a ticket round is ${roundSeconds}s here instead of 24h on Arbitrum One, where a ticket is valid for 24h. A ticket bought in ticket round N is active in round N+1 only.`
 }
 
 /** Pure: the short summary of the background purchase (no tx hashes, no block numbers). */
 export function ticketSummaryLines(i: { keyHash: string; round: number; renewed: boolean | 'pending'; activeFrom: number; activeUntil: number }): string[] {
   return [
-    `==> ticket bought for our key hash ${i.keyHash} in ticket round ${i.round} (mint TEST, approve, deposit, purchase)`,
+    `==> ticket bought for our key hash ${i.keyHash} in ticket round ${i.round} (approve USDGTest, deposit, purchase)`,
     `NOTE: the ticket activated at ${clock(i.activeFrom)} and expires at ${clock(i.activeUntil)}${i.renewed === 'pending' ? ' (renewing it for the next ticket round in the background; chapter 4 reports the outcome)' : i.renewed ? ', already renewed for the next ticket round so the live view survives the rollover' : ' (the renewal did not land; it is retried before the chapters that need the ticket)'}`,
   ]
 }
 
-/**
- * Pure: when more than 20 s of the activation wait remain, the one waiting line; else undefined. `upTo`: the purchase has not landed
- * yet, so the time is an upper estimate, not a promise.
- */
-export function activationWaitLine(remainingMs: number, upTo = false): string | undefined {
-  if (remainingMs <= 20_000) return undefined
-  const s = Math.ceil(remainingMs / 1000)
-  return upTo ? `==> waiting for the ticket purchase to land and activate (up to ~${s}s)` : `==> waiting ~${s}s for the ticket to activate`
-}
+const CARD_LEFT = 35
+const CARD_RIGHT = 38
+const shortHex = (h: string): string => (h.length > 18 ? `${h.slice(0, 10)}…${h.slice(-6)}` : h)
 
 /**
- * Pure: when will a ticket whose purchase has not landed yet activate? The mint, approve and deposit take about 3 blocks first;
- * if the purchase then has less than `minRoundLeftS` of the current round, it lands in the next one (see buyTickets), so the
- * estimate is that round's end.
+ * Pure (F2): a boxed preview of a ticket: what is inside it (left) and how it is used (right), plain characters, every line at most 80
+ * columns. The feed key itself is never an input; only its hash, shortened.
  */
-export function estimateActivationMs(roundEndMs: number, nowMs: number, roundMs: number, blockMs: number): number {
-  const startsBuying = nowMs + 3 * blockMs
-  const lands = roundEndMs - startsBuying < minRoundLeftS(blockMs) * 1000 ? roundEndMs + roundMs : roundEndMs
-  return Math.max(lands, nowMs)
+export function formatTicketCard(i: { round: number; owner: string; keyHash: string; numTickets: number; activeFrom: number; activeUntil: number; roundSeconds: number }): string[] {
+  const left = [
+    'WHAT IS IN THE TICKET',
+    `bought in    : round ${i.round}`,
+    `owner        : ${shortHex(i.owner)}`,
+    `feed key hash: ${shortHex(i.keyHash)}`,
+    `tickets      : ${i.numTickets}`,
+    `active from  : ${clock(i.activeFrom)}`,
+    `expires      : ${clock(i.activeUntil)}`,
+    'valid for    : 24h on Arbitrum One',
+    `  here: ${i.roundSeconds}s, one ticket round`,
+  ]
+  const right = [
+    'HOW IT IS USED',
+    '1. USDGTest.approve(Tickets,',
+    '   amount)',
+    '2. Tickets.depositToken(amount)',
+    '   (your internal balance)',
+    '3. read roundNumber() and',
+    '   currentPrice()',
+    '4. Tickets.purchaseTickets(',
+    `     expectedRound=${i.round},`,
+    '     expectedPrice,',
+    `     numTicketsDesired=${i.numTickets},`,
+    `     apiKeyHash=${shortHex(i.keyHash)})`,
+    '   (reverts if round/price moved)',
+    '5. open the Fast Feed WebSocket',
+    '   Authorization: Bearer <key>',
+    '   feed: keccak256(key), then',
+    '   counts TicketsPurchased',
+  ]
+  const l = left
+  const r = right
+  const n = Math.max(l.length, r.length)
+  const bar = `+${'-'.repeat(CARD_LEFT + 2)}+${'-'.repeat(CARD_RIGHT + 2)}+`
+  const rows = Array.from({ length: n }, (_, k) => `| ${(l[k] ?? '').padEnd(CARD_LEFT)} | ${(r[k] ?? '').padEnd(CARD_RIGHT)} |`)
+  return [bar, rows[0]!, bar, ...rows.slice(1), bar]
+}
+
+/** Pure: when the purchase should have landed (about PURCHASE_BLOCKS blocks after the flow started); the time left, never negative. */
+export function purchaseLandWaitMs(startedAt: number, nowMs: number, blockMs: number): number {
+  return Math.max(0, startedAt + PURCHASE_BLOCKS * blockMs - nowMs)
+}
+
+/** Pure: the one waiting line when more than 20 s remain, else undefined. The purchase needs mined blocks, so this is an upper estimate. */
+export function activationWaitLine(remainingMs: number, kind: 'purchase' | 'activation' = 'purchase'): string | undefined {
+  if (remainingMs <= 20_000) return undefined
+  if (kind === 'activation') return `==> waiting ~${Math.ceil(remainingMs / 1000)}s for the ticket to activate`
+  return `==> waiting for the ticket purchase to land (up to ~${Math.ceil(remainingMs / 1000)}s)`
 }
 
 async function chapter3(st: State): Promise<void> {
   const bg = st.bg
   if (!bg) throw new Error('the background ticket purchase was not started')
   emit([ticketRoundNoteLine(st.stack.params.tickets.roundSeconds)])
-  // Still minting or purchasing: estimate which ticket round the purchase lands in.
-  const estimate = async (): Promise<number> => {
-    try {
-      const { roundEndMs } = await readTicketRound(st.preset, st.mine)
-      return estimateActivationMs(roundEndMs, chainNowMs(), st.stack.params.tickets.roundSeconds * 1000, st.stack.params.blockMs) - chainNowMs()
-    } catch {
-      return 0
-    }
+  // Only the purchase itself needs time (mined blocks cannot be skipped); the activation is skipped silently as soon as it has landed (F2).
+  let waitPrinted = false
+  if (bg.activeFrom === undefined && !bg.settled) {
+    const w = activationWaitLine(purchaseLandWaitMs(bg.startedAt ?? Date.now(), Date.now(), st.stack.params.blockMs))
+    if (w) { emit([w]); waitPrinted = true }
   }
-  let announced = false
-  // E2: a demo that owns the simulator skips its chain clock to the activation time instead of making the room wait (an attached stack is never touched).
-  if (!st.stack.attached) {
-    if (bg.activeFrom === undefined && !bg.settled) {
-      const w = activationWaitLine(await estimate(), true) // the purchase is still landing (the prompts did not freeze the simulator meanwhile)
-      if (w) emit([w])
-      announced = true
-    }
-    await until(() => bg.activeFrom !== undefined || bg.settled === true, Math.max(60_000, 8 * st.stack.params.blockMs + 30_000), 'the ticket purchase to land').catch(() => {})
-    if (bg.activeFrom !== undefined && bg.activeFrom - chainNowMs() > ACTIVATION_SKIP_OVER_MS) {
-      note(SKIP_NOTE)
-      await skipSimClock(st, Math.ceil(bg.activeFrom / 1000)).catch((e: Error) => note(`could not skip the simulator clock (${e.message}); waiting for the ticket to activate instead.`))
-    }
+  await until(() => bg.activeFrom !== undefined || bg.settled === true, Math.max(60_000, 8 * st.stack.params.blockMs + 30_000), 'the ticket purchase to land').catch(() => {})
+  await bg.skipped
+  // Attached stacks (or a failed skip) wait for the activation: say so, unless the purchase wait line was already the one waiting line.
+  if (!waitPrinted && bg.activeFrom !== undefined) {
+    const w = activationWaitLine(bg.activeFrom - chainNowMs(), 'activation')
+    if (w) emit([w])
   }
-  let remainingMs = bg.activeFrom !== undefined ? bg.activeFrom - chainNowMs() : undefined
-  const upTo = remainingMs === undefined
-  if (remainingMs === undefined) remainingMs = await estimate()
-  const wait = activationWaitLine(remainingMs, upTo)
-  if (wait && !announced) emit([wait])
-  // Report the ticket as soon as it is active; the renewal keeps going in the background (chapter 4 reports it).
   const r = await bg.landed
   if (!r.ok) throw r.error
   st.session = r.session
@@ -715,6 +775,7 @@ async function chapter3(st: State): Promise<void> {
   // E3: the renewal outcome is printed once: here when it already settled, else by chapter 4 (`reportRenewal`).
   if (settled) st.renewalReported = true
   emit(ticketSummaryLines({ keyHash: st.mine.keyHash, round: r.round, renewed: settled ? ((await bg.done) as { renewed?: boolean }).renewed === true : 'pending', activeFrom: r.session.activeFrom, activeUntil: r.session.activeUntil }))
+  for (const l of formatTicketCard({ round: r.round, owner: st.mine.account.address, keyHash: st.mine.keyHash, numTickets: 1, activeFrom: r.session.activeFrom, activeUntil: r.session.activeUntil, roundSeconds: st.stack.params.tickets.roundSeconds })) plain(l)
 }
 
 /**
@@ -870,12 +931,17 @@ async function chapter4(st: State, io: { prompt?: () => Promise<void> } = {}): P
 
 
 /** The in-place panel over the live view. `extra` adds lines under it (chapter 4: the block story, the prompt and the status). */
+/** Pure (F6): the blocks of the generic frame. While a hold is armed and its block is unknown (`hide`), the open block, the future X, is left out so its rows are never drawn whole before the paced reveal. */
+export function genericFrameBlocks<T>(open: T | undefined, previous: T | undefined, hide: boolean): { open: T | undefined; previous: T | undefined } {
+  return hide ? { open: previous, previous: undefined } : { open, previous }
+}
+
 function makePanel(
   st: State,
   mine: ReadonlySet<string>,
   extra: () => { text: string; kind: 'note' | 'important' | 'step' }[] = () => [],
   /** E3: once `block()` names the story's block, the panel shows only that block, laid out top-down by `compose` (it gets the block's panel lines). */
-  story?: { block: () => number | undefined; compose: (body: string[], dims: { columns: number; rows: number }) => { lines: string[]; tail: string[] } },
+  story?: { block: () => number | undefined; hideOpen?: () => boolean; compose: (body: string[], dims: { columns: number; rows: number }) => { lines: string[]; tail: string[] } },
 ): PanelRenderer {
   const live = st.live!
   const k = st.stack.params.k
@@ -899,7 +965,9 @@ function makePanel(
         tail = c.tail.length + under.length // the NOTE + prompt (held) or the sealed line (after resume) survive a cut; rows are trimmed first
         return [...c.lines, ...c.tail, ...under]
       }
-      return [...formatPanel(open, previous, now, { mine, color, k, width: dims.columns, maxLines: Math.max(8, dims.rows - 2 - under.length) }), ...under]
+      // F6: while a hold is armed and its block unknown, the open block (the future X) is not drawn, so its rows are never shown whole.
+      const g = genericFrameBlocks(open, previous, story?.hideOpen?.() === true)
+      return [...formatPanel(g.open, g.previous, now, { mine, color, k, width: dims.columns, maxLines: Math.max(8, dims.rows - 2 - under.length) }), ...under]
     },
   })
   st.panel = panel
@@ -1103,6 +1171,11 @@ function printOut(lines: readonly OutLine[]): void {
   }
 }
 
+/** F6: like `printOut`, but the table rows the formatter flagged as new are revealed one by one on a terminal (see pacing.ts). */
+async function printOutPaced(st: State, lines: readonly OutLine[]): Promise<void> {
+  await st.pacer.printLines(lines, (l) => printOut([l]), () => wnote(PACING_NOTE))
+}
+
 interface Target {
   block: number
   /** Where the block started on the client's clock with the simulator's pauses taken out (see `retimeForPause`): the origin of the timing table. */
@@ -1123,7 +1196,7 @@ interface Round2Run {
  * round 1 is published on the feed and its round 2 is held open (`heldAt`). On success the client side is frozen too (`adoptHold`).
  * A refusal, an older simulator or a timeout is reported, never thrown, so the caller falls back to the unheld behaviour.
  */
-async function armAndWait(st: State, timeoutMs: number): Promise<{ ok: true; block: number } | { ok: false; reason: string }> {
+async function armAndWait(st: State, timeoutMs: number, onBlock?: (block: number) => void): Promise<{ ok: true; block: number } | { ok: false; reason: string }> {
   const url = st.preset.sendUrl
   return armHoldAndWait({
     rpc: (m, p) => simRpc(url, m, p),
@@ -1132,7 +1205,10 @@ async function armAndWait(st: State, timeoutMs: number): Promise<{ ok: true; blo
     onArmed: (hold) => {
       st.hold = hold // the signal handler and the caller's `finally` release it; `holdFrom` stays unset until the pause took effect
     },
-    onHeld: (hold, chainNow) => adoptHold(st, hold, chainNow),
+    onHeld: (hold, chainNow, block) => {
+      if (block !== undefined) onBlock?.(block)
+      adoptHold(st, hold, chainNow)
+    },
     onTimeout: () => endHold(st),
   })
 }
@@ -1148,24 +1224,43 @@ export async function armHoldAndWait(o: {
   timeoutMs: number
   pollMs?: number
   onArmed: (hold: SimHold) => void
-  onHeld: (hold: SimHold, chainNowMs: number) => void
+  onHeld: (hold: SimHold, chainNowMs: number, block?: number) => void
   onTimeout: () => Promise<void>
   leaseMs?: number
 }): Promise<{ ok: true; block: number } | { ok: false; reason: string }> {
+  const armed = await armHold(o)
+  if (!armed.ok) return armed
+  return waitHeld({ ...o, hold: armed.hold })
+}
+
+/** F5: the first half of `armHoldAndWait`: arm the hold (the simulator pauses right after the next block's round 1). Refused or missing: `{ok: false}`. */
+export async function armHold(o: { rpc: SimRpcFn; holder: string; onArmed: (hold: SimHold) => void; leaseMs?: number }): Promise<{ ok: true; hold: SimHold } | { ok: false; reason: string }> {
   const hold = new SimHold(o.rpc, o.holder, o.leaseMs)
   const got = await hold.acquire('afterRound1')
   if (got.state !== 'paused') return { ok: false, reason: got.reason }
   o.onArmed(hold)
+  return { ok: true, hold }
+}
+
+/** F5: the second half: poll `sim_clock` until the armed hold took effect and report its block; a timeout releases the hold first. */
+export async function waitHeld(o: {
+  rpc: SimRpcFn
+  hold: SimHold
+  timeoutMs: number
+  pollMs?: number
+  onHeld: (hold: SimHold, chainNowMs: number, block?: number) => void
+  onTimeout: () => Promise<void>
+}): Promise<{ ok: true; block: number } | { ok: false; reason: string }> {
   const end = Date.now() + o.timeoutMs
   for (;;) {
     const info = await o.rpc<SimClockInfo>('sim_clock').catch(() => undefined)
     if (info?.paused && info.heldAt) {
-      o.onHeld(hold, info.chainNowMs)
+      o.onHeld(o.hold, info.chainNowMs, info.heldAt.block)
       return { ok: true, block: info.heldAt.block }
     }
     if (Date.now() > end) {
       await o.onTimeout()
-      await hold.release().catch(() => undefined) // disarms an armed hold that never took effect (a no-op once released)
+      await o.hold.release().catch(() => undefined) // disarms an armed hold that never took effect (a no-op once released)
       return { ok: false, reason: `no block with transactions opened within ${Math.round(o.timeoutMs / 1000)}s` }
     }
     await sleep(o.pollMs ?? 40)
@@ -1179,7 +1274,7 @@ export async function armHoldAndWait(o: {
  */
 export function composeStoryPanel(
   body: readonly string[],
-  o: { block: number; blockMs: number; roundMs: number; k: number; columns: number; color: boolean; slowed: readonly string[]; prompt?: string; sealed?: string },
+  o: { block: number; blockMs: number; roundMs: number; k: number; columns: number; color: boolean; slowed: readonly string[]; prompt?: string; sealed?: string; reveal?: Readonly<Record<number, number | undefined>> },
 ): { lines: string[]; tail: string[] } {
   const cut = (kind: 'note' | 'important' | 'step', text: string) => (o.color ? style(kind, text.slice(0, o.columns)) : text.slice(0, o.columns))
   const after = [...o.slowed.map((l) => cut('note', l)), ...(o.prompt !== undefined ? [cut('important', o.prompt)] : [])]
@@ -1188,12 +1283,19 @@ export function composeStoryPanel(
   let headed = false
   let held = false
   let inserted = false
+  let curRound: number | undefined // F6: rows of a round are revealed one by one: only the first `reveal[round]` of its rows are drawn
+  let drawn = 0
   for (const line of body.slice(2)) {
     const m = /^ {2}round (\d+)\/\d+(.*)$/.exec(line)
     if (!m) {
+      const limit = curRound === undefined ? undefined : o.reveal?.[curRound]
+      if (limit !== undefined && drawn >= limit) continue
+      drawn++
       out.push(line)
       continue
     }
+    curRound = Number(m[1])
+    drawn = 0
     if (m[1] === '2' && /^: not ordered yet/.test(m[2]!)) {
       held = true // round 2 has not run: the NOTE and the prompt are the tail, in place of its empty header
       continue
@@ -1267,6 +1369,12 @@ async function roundTwoAttempt(st: State, io: { prompt?: () => Promise<void> }, 
   let storyX: number | undefined
   let slowedLines: string[] = []
   let sealed: string | undefined
+  /** F6: per round, how many of its rows the panel draws so far (absent = all). */
+  const reveal: Record<number, number | undefined> = {}
+  // Pacing happens only while the simulator is held (display only: it must never delay the sends); set once the hold took effect.
+  let pacer = st.pacer.when(false)
+  let hideOpen = false // armed, the held block unknown: the generic frame must not draw the block that is about to be X
+  const announcePace = (n: number) => pacer.announce(n, () => (panel ? showNote(PACING_NOTE) : wnote(PACING_NOTE)))
   const color = colorEnabled(process.stdout.isTTY)
   const usePanel = panelAllowed(process.stdout.isTTY)
   let panel: PanelRenderer | undefined
@@ -1274,17 +1382,26 @@ async function roundTwoAttempt(st: State, io: { prompt?: () => Promise<void> }, 
   if (usePanel) {
     panel = makePanel(st, mineSet, () => [...story, ...(transient ? [transient] : []), ...(storyX === undefined && promptText ? promptPanelLines(promptText(), undefined) : [])], {
       block: () => storyX,
-      compose: (body, dims) => composeStoryPanel(body, { block: storyX!, blockMs: params.blockMs, roundMs: params.roundMs, k: params.k, columns: dims.columns, color, slowed: slowedLines, prompt: promptText?.(), sealed }),
+      hideOpen: () => hideOpen,
+      compose: (body, dims) => composeStoryPanel(body, { block: storyX!, blockMs: params.blockMs, roundMs: params.roundMs, k: params.k, columns: dims.columns, color, slowed: slowedLines, prompt: promptText?.(), sealed, reveal }),
     })
     panel.start()
   }
   const roundRows = (n: number, r: number) => st.rows.filter((x) => x.blockNumber === n && x.pgaRound === r).sort((a, b) => a.txIndex - b.txIndex)
   /** Line mode: the rows of one round as the live view's table. The panel shows them itself. */
-  const printRound = (n: number, r: number) => {
+  const printRound = async (n: number, r: number) => {
     if (panel) return
     const [group] = groupRows(roundRows(n, r))
-    if (group) for (const l of formatTable(group, { mine: mineSet, bold: colorEnabled(process.stdout.isTTY) })) plain(l)
+    if (!group) return
+    const lines = formatTable(group, { mine: mineSet, bold: colorEnabled(process.stdout.isTTY) })
+    for (const l of lines.slice(0, 2)) plain(l) // the table's label and column header first (widths already come from all rows)
+    await pacer.reveal(lines.length - 2, (shown) => {
+      for (let k = shownLines; k < shown; k++) plain(lines[2 + k]!)
+      shownLines = shown
+    })
+    shownLines = 0
   }
+  let shownLines = 0
 
   const timeoutMs = 2 * params.blockMs + 60_000
   /** The unheld fallback: wait until the feed has shown round 1 of an open block and its round 2 still has time. */
@@ -1309,8 +1426,18 @@ async function roundTwoAttempt(st: State, io: { prompt?: () => Promise<void> }, 
   try {
     // --- 1. Which block? Ask the simulator to hold the next block after its round 1.
     if (panel) transient = { text: 'waiting for the next block: the demo slows the simulator down right after its round 1', kind: 'step' }
-    const armed = await armAndWait(st, timeoutMs)
+    hideOpen = panel !== undefined && st.pacer.enabled
+    const armed = await armAndWait(st, timeoutMs, (b) => {
+      // The hold took effect on block b: from this frame on only the story view draws it, with round 1's rows hidden until revealed.
+      if (panel && st.pacer.enabled) {
+        reveal[1] = 0
+        storyX = b
+      }
+      hideOpen = false
+    })
+    hideOpen = false
     const held = armed.ok
+    pacer = st.pacer.when(held)
     if (armed.ok) {
       const X = armed.block
       await until(() => roundRows(X, 1).length > 0, 10_000, 'round 1 of the held block on the Fast Feed').catch(() => {}) // published just before the hold
@@ -1326,17 +1453,22 @@ async function roundTwoAttempt(st: State, io: { prompt?: () => Promise<void> }, 
     }
 
     // --- 2. Round 1, as it arrived on the feed.
-    const showHeaders = (n: number, round1Txs: number) => {
+    const showHeaders = async (n: number, round1Txs: number) => {
       if (panel) {
+        if (pacer.enabled) reveal[1] = 0 // the rows are revealed below, inside the frame
         storyX = n // the panel now shows only this block, with the headers above their rows
         transient = undefined
+        announcePace(round1Txs)
+        await pacer.reveal(roundRows(n, 1).length, (shown) => void (reveal[1] = shown))
+        reveal[1] = undefined
         return
       }
       wstep(blockHeaderLine(n, params.blockMs))
+      announcePace(round1Txs)
       wstep(`${roundHeaderLine(1, params.k, params.roundMs)} · ${round1Txs} tx${round1Txs === 1 ? '' : 's'}:`)
-      printRound(n, 1)
+      await printRound(n, 1)
     }
-    showHeaders(target.block, target.round1Txs)
+    await showHeaders(target.block, target.round1Txs)
     let X = target.block
 
     if (held) {
@@ -1365,7 +1497,7 @@ async function roundTwoAttempt(st: State, io: { prompt?: () => Promise<void> }, 
         t = await waitTarget()
         target = t
         X = t.block
-        showHeaders(X, t.round1Txs)
+        await showHeaders(X, t.round1Txs)
       }
     } else {
       showStep(`no prompt (${attempt > 1 ? 'the retry is automatic' : 'no --pause on a terminal'}): sending your ${tipGwei} gwei tx into round 2 of block ${X}${panel ? '' : ' now'}`)
@@ -1376,6 +1508,7 @@ async function roundTwoAttempt(st: State, io: { prompt?: () => Promise<void> }, 
 
     // --- 3. The sends. While the simulator is held they all queue for round 2; it resumes once the proxy accepted every one.
     const deadline = Math.max(60_000, 2 * params.blockMs + 30_000)
+    if (panel && pacer.enabled) reveal[2] = 0 // round 2's rows (hidden until revealed) are not drawn the moment they arrive
     if (held) st.holdSendsFrom = Date.now() // from here the sends keep their real gaps on the timing table's timeline
     else probes = [{ n: B, p: waitBlockVisible(preset.rpcUrl, B, deadline, 25) }]
     showStep(`sending ${competitors.length} competitors (tips ${competitors.map((c) => gwei(c.tip)).join(', ')} gwei), then yours (${tipGwei} gwei) into round 2 of block ${B}`)
@@ -1399,9 +1532,15 @@ async function roundTwoAttempt(st: State, io: { prompt?: () => Promise<void> }, 
     if (xRow.blockNumber !== B) probes.push({ n: xRow.blockNumber, p: waitBlockVisible(preset.rpcUrl, xRow.blockNumber, deadline, 25) })
     // --- 4. Round 2 on the feed, our tx on top.
     await sleep(400) // longer than the view's quiet period: the rest of the round is in
+    const round2Rows = roundRows(xRow.blockNumber, xRow.pgaRound ?? 2).length
     if (!panel) {
-      wstep(`${roundHeaderLine(2, params.k, params.roundMs)} · ${roundRows(xRow.blockNumber, xRow.pgaRound ?? 2).length} txs:`)
-      printRound(xRow.blockNumber, xRow.pgaRound ?? 2)
+      announcePace(round2Rows)
+      wstep(`${roundHeaderLine(2, params.k, params.roundMs)} · ${round2Rows} txs:`)
+      await printRound(xRow.blockNumber, xRow.pgaRound ?? 2)
+    } else {
+      announcePace(round2Rows)
+      await pacer.reveal(round2Rows, (shown) => void (reveal[2] = shown))
+      reveal[2] = undefined
     }
     // --- 5. The sealed block.
     const seen = await Promise.all(probes.map(async (x) => ({ n: x.n, at: await x.p })))
@@ -1473,6 +1612,7 @@ async function roundTwoAttempt(st: State, io: { prompt?: () => Promise<void> }, 
     return { judgement: j, leadMs: lead }
   } finally {
     await endHold(st).catch(() => {}) // never leave the simulator held (also after an error); the lease is the backstop
+    reveal[1] = reveal[2] = undefined // an error path must not leave a round hidden in the final frame
     if (panel) {
       await sleep(400).catch(() => {})
       live.flush()
@@ -1506,35 +1646,82 @@ async function stopLive(st: State, fast = false): Promise<void> {
   }
 }
 
-/** F1: the race's own block (the one holding mine's claim) with and without Fast Feed. Never changes the verdict: any problem is one NOTE. */
-async function printRaceBlockComparison(st: State, input: RaceInput, feed: readonly { msg: FeedMessageJson; at: number }[]): Promise<void> {
+/**
+ * F1/F5: the comparison's input for block `block` from the feed rows mine's own connection saw. `retime` takes the simulator's holds out
+ * of the rows' receive times (`visibleAt` must already be on the same time line).
+ */
+async function comparisonInput(
+  st: State,
+  o: { block: number; feed: readonly { msg: FeedMessageJson; at: number }[]; mine: string; rival: string; rivalBlock?: number; visibleAt: number | undefined; retime: (t: number) => number },
+): Promise<BlockComparisonInput> {
+  const rows: LiveRow[] = []
+  for (const f of o.feed) if (f.msg.transaction.block_number === o.block || f.msg.transaction.block_number === o.rivalBlock) rows.push(await decodeLiveRow(f.msg, o.retime(f.at)))
+  const p = st.stack.params
+  return {
+    rows,
+    visibleAt: o.visibleAt,
+    block: o.block,
+    blockMs: p.blockMs,
+    k: p.k,
+    roundMs: p.roundMs,
+    mine: new Set([o.mine.toLowerCase()]),
+    rival: new Set([o.rival.toLowerCase()]),
+    rivalBlock: o.rivalBlock,
+    columns: process.stdout.isTTY ? process.stdout.columns : undefined,
+  }
+}
+
+/** F1: the race's own block (the one holding mine's claim) with and without Fast Feed, all at once (the unstaged flow). Never changes the verdict: any problem is one NOTE. */
+async function printRaceBlockComparison(st: State, input: RaceInput, feed: readonly { msg: FeedMessageJson; at: number }[], retime: (t: number) => number): Promise<void> {
   const landed = input.mine.landed
   if (!landed) return printOut(comparisonSkipNote('mine\'s claim did not land in a block'))
   const block = Number(landed.block)
   if (input.openBlock !== block) return printOut(comparisonSkipNote(`mine's claim landed in block ${block}, not in the block of open (${input.openBlock ?? '?'}), whose visibility was measured`))
-  const rows: LiveRow[] = []
-  for (const f of feed) if (f.msg.transaction.block_number === block) rows.push(await decodeLiveRow(f.msg, f.at))
-  const p = st.stack.params
-  printOut(
-    formatBlockComparison({
-      rows,
-      visibleAt: input.visibleAt,
-      block,
-      blockMs: p.blockMs,
-      k: p.k,
-      roundMs: p.roundMs,
-      mine: new Set([input.mine.address.toLowerCase()]),
-      rival: new Set([input.rival.address.toLowerCase()]),
-      columns: process.stdout.isTTY ? process.stdout.columns : undefined,
-    }),
-  )
+  const rivalBlock = input.rival.landed ? Number(input.rival.landed.block) : undefined
+  printOut(formatBlockComparison(await comparisonInput(st, { block, feed, mine: input.mine.address, rival: input.rival.address, rivalBlock, visibleAt: input.visibleAt, retime })))
 }
 
-async function chapter5(st: State): Promise<void> {
+/** F3: tips (gwei) of the extra txs in the race's block N (with `open`) and block M (with the rival's claim), and F5's in round 2 of block N behind mine's claim: all below 0.1 (rival) and 0.2 (mine). */
+export const RACE_EXTRA_TIPS_GWEI = { first: ['0.05', '0.03', '0.02', '0.01'], second: ['0.04', '0.025', '0.015'], round2: ['0.045', '0.035', '0.025', '0.015'] } as const
+
+/**
+ * F3: best-effort extra lower-tip txs for the race's blocks, so the with / without Fast Feed tables have a few rows. Presigned
+ * (explicit nonce) and sent through the proxy; any failure is swallowed (they only decorate the comparison, never the verdict).
+ * `round2` (F5) resolves once the proxy accepted every one (the hold waits for it). `settled()` is awaited before the comparison is printed.
+ */
+function raceExtrasSender(st: State): { first: () => void; second: () => void; round2: () => Promise<void>; settled: () => Promise<void> } {
+  const { preset } = st
+  const pending: Promise<unknown>[] = []
+  const batch = (tips: readonly string[]): Promise<void> => {
+    const job = (async () => {
+      const read = createPublicClient({ transport: http(preset.rpcUrl) })
+      const send = createPublicClient({ transport: http(preset.sendUrl) })
+      const gas = ((await read.estimateGas({ account: privateKeyToAccount(anvilDevKey(ANVIL_ACCOUNT_MAP.raceExtras[0])).address, to: DEAD, value: 0n })) * 11n) / 10n
+      for (const [n, t] of tips.entries()) {
+        const acct = privateKeyToAccount(anvilDevKey(ANVIL_ACCOUNT_MAP.raceExtras[n % ANVIL_ACCOUNT_MAP.raceExtras.length]!))
+        const nonce = await read.getTransactionCount({ address: acct.address, blockTag: 'pending' })
+        const raw: Hex = await presign({ to: DEAD, value: 0n, tip: parseGwei(t), maxFee: INJECT_MAX_FEE, nonce, gas, account: acct, chain: { id: preset.chainId } })
+        await send.sendRawTransaction({ serializedTransaction: raw }).catch(() => undefined)
+      }
+    })().catch(() => undefined)
+    pending.push(job)
+    return job
+  }
+  return {
+    first: () => void batch(RACE_EXTRA_TIPS_GWEI.first),
+    second: () => void batch(RACE_EXTRA_TIPS_GWEI.second),
+    round2: () => batch(RACE_EXTRA_TIPS_GWEI.round2),
+    settled: async () => void (await Promise.allSettled(pending)),
+  }
+}
+
+/** F5: the note printed when the stages cannot be shown (the hold was refused, missing or on another block). */
+export const stagesFallbackNote = (reason: string): string => `could not hold the simulator after round 1 (${reason}): the race block is shown in one go, without stages.`
+
+async function chapter5(st: State, io: { prompt?: () => Promise<void> } = {}): Promise<void> {
   const { preset } = st
   await stopLive(st)
   await sleep(st.stack.params.roundMs + 500) // let the last in-flight traffic transactions land: the race starts quiet
-  setInternalVisible(true) // from here the sequencer's round queue is narrated (local internals; a real sequencer is a black box)
   try {
     const sc = SCENARIOS.s3
     step(sc.title)
@@ -1549,20 +1736,138 @@ async function chapter5(st: State): Promise<void> {
       ids: { mine: st.mine, rival: newIdentity('rival', ANVIL_ACCOUNT_MAP.raceRival) },
       session: st.session,
     })
+    const params = st.stack.params
+    const mineAddr = rc.ids.mine.account.address
+    const rivalAddr = rc.ids.rival.account.address
+    const operator = new Set([rc.operator.address.toLowerCase()])
+    const retime = (t: number): number => retimeThrough(st.pauses, t) // the holds (and the Enter waits) are not part of any time shown
     // F1: mine's own feed connection already sees every message; keep them to show the race's block with Fast Feed.
-    const raceFeed: { msg: FeedMessageJson; at: number }[] = []
+    let raceFeed: { msg: FeedMessageJson; at: number }[] = []
+    const local = rc.preset.mode === 'local'
+    let noted = false
+    let attempt = 0
+    let extras = raceExtrasSender(st) // F3: per attempt, best effort
+    let visibleRaw: number | undefined // the probe's wall time for block N (stage 2 and 3 use this one value)
+    let finalVisible: () => number | undefined = () => undefined
+    let tryInput: RaceInput | undefined // the finished race, for stage 3
+
+    const feedRows = (block: number, round: number) => raceFeed.filter((f) => f.msg.transaction.block_number === block && f.msg.pga_round === round).length
+    const attemptOnce = async () => {
+      attempt++
+      const attemptNo = attempt
+      raceFeed = []
+      extras = raceExtrasSender(st)
+      visibleRaw = undefined
+      tryInput = undefined
+      let held: number | undefined // block N once the hold took effect
+      const url = st.preset.sendUrl
+      const rpc: SimRpcFn = (m, p) => simRpc(url, m, p)
+      let armedHold: SimHold | undefined
+      const cmp = async (o: { rivalBlock?: number; visibleAt: number | undefined }) =>
+        comparisonInput(st, { block: held!, feed: raceFeed, mine: mineAddr, rival: rivalAddr, retime, ...o })
+      const prompt = io.prompt && attemptNo === 1 ? io.prompt : undefined
+      const s = new RaceStager({
+        arm: async () => {
+          if (!local) return { ok: false, reason: 'not a local stack' }
+          const r = await armHold({ rpc, holder: holderName(), onArmed: (h) => ((armedHold = h), (st.hold = h)) })
+          return r.ok ? { ok: true } : r
+        },
+        waitHeld: async () => {
+          const r = await waitHeld({ rpc, hold: armedHold!, timeoutMs: 2 * params.roundMs + 10_000, onHeld: (h, chainNow) => adoptHold(st, h, chainNow), onTimeout: () => endHold(st) })
+          if (r.ok) held = r.block
+          return r
+        },
+        release: () => endHold(st),
+        showStage1: async (block) => {
+          await until(() => feedRows(block, 1) > 0, 10_000, 'round 1 of the race block on the Fast Feed').catch(() => {})
+          await sleep(350) // longer than a round's publish: the whole round is in
+          wnote(`the demo holds the simulator after round 1 of block ${block} (Arbitrum never does): mine's claim and a few more txs wait in the queue for round 2.`)
+          await printOutPaced(st, formatComparisonStage(await cmp({ visibleAt: undefined }), 1))
+          if (prompt) wimportant(`Press Enter: resume the simulator, round 2 of block ${block} runs now`)
+        },
+        sendRound2Extras: () => extras.round2(),
+        prompt: prompt ? () => prompt() : undefined,
+        sleep: async (ms) => void (await sleep(ms)),
+        showStage2: async (visibleAt) => {
+          await sleep(250) // the rest of round 2's rows are in
+          const v = visibleAt === undefined ? finalVisible() : retime(visibleAt)
+          await printOutPaced(st, formatComparisonStage(await cmp({ visibleAt: v }), 2))
+        },
+        hasStage3: () => {
+          const inp = tryInput
+          return inp !== undefined && inp.mine.landed !== undefined && Number(inp.mine.landed.block) === held && inp.rival.landed !== undefined && Number(inp.rival.landed.block) !== held
+        },
+        showStage3: async () => {
+          const inp = tryInput!
+          const v = visibleRaw !== undefined ? retime(visibleRaw) : inp.visibleAt
+          printOut(formatComparisonStage(await cmp({ rivalBlock: Number(inp.rival.landed!.block), visibleAt: v }), 3))
+        },
+        promptStage3:
+          io.prompt && attemptNo === 1
+            ? async () => {
+                wimportant('Press Enter: show the block where the rival\'s claim landed (right side only)')
+                await whilePaused(st, io.prompt!)
+              }
+            : undefined,
+        fallbackNote: (reason) => {
+          if (noted) return
+          noted = true
+          wnote(stagesFallbackNote(reason))
+        },
+      })
+      finalVisible = () => tryInput?.visibleAt
+      return s
+    }
+
+    let last: RaceStager | undefined
     const trial = await runTrialWithRetry(
-      () => runTrial(rc, sc, { pollMs: DEFAULT_POLL_MS, onMineFeed: (msg, at) => raceFeed.push({ msg, at }) }),
+      async () => {
+        const s = (last = await attemptOnce())
+        return runTrial(rc, sc, {
+          pollMs: DEFAULT_POLL_MS,
+          retime,
+          onMineFeed: (msg, at) => raceFeed.push({ msg, at }),
+          beforeOpenSent: local ? () => s.beforeOpen() : undefined,
+          afterMineSent: local ? (b) => s.afterMineSent(b) : undefined,
+          onOpenSent: local ? () => extras.first() : undefined,
+          beforeClaimsLine: st.pacer.enabled ? () => s.drain() : undefined,
+          onOpenBlockVisible: local
+            ? (t) => {
+                visibleRaw = t
+                extras.second()
+                s.onVisible(t)
+              }
+            : undefined,
+        })
+      },
       (first) => step(`inconclusive (${first.split(':')[0]}); retrying once with a fresh race`),
     )
+    if (st.pacer.enabled) await last?.drain() // a paced stage 2 may still be revealing rows: do not interleave the report with it
     const verdict = printTrialReport(trial, sc)
-    await printRaceBlockComparison(st, trial.input, raceFeed).catch((e: unknown) => printOut(comparisonSkipNote(`${(e as Error).message}`)))
+    await extras.settled()
+    tryInput = trial.input
+    const stagedRun = last?.staged === true
+    if (stagedRun) await last!.finish().catch((e: unknown) => printOut(comparisonSkipNote(`${(e as Error).message}`)))
+    else await printRaceBlockComparison(st, trial.input, raceFeed, retime).catch((e: unknown) => printOut(comparisonSkipNote(`${(e as Error).message}`)))
+    // F5: at most 3 NOTE lines on what the sequencer did, from the rows the feed showed (the streamed [sequencer] narration is off here).
+    try {
+      const blockN = trial.input.openBlock
+      const rivalBlock = trial.input.rival.landed ? Number(trial.input.rival.landed.block) : undefined
+      if (blockN !== undefined) {
+        const rows: LiveRow[] = []
+        for (const f of raceFeed) if (f.msg.transaction.block_number === blockN || f.msg.transaction.block_number === rivalBlock) rows.push(await decodeLiveRow(f.msg, retime(f.at)))
+        const rivalSeen = trial.input.rival.seenAt
+        printOut(formatSequencerSummary({ block: blockN, rows, operator, mine: new Set([mineAddr.toLowerCase()]), rival: new Set([rivalAddr.toLowerCase()]), rivalSawAfterSealed: rivalSeen !== undefined && trial.input.visibleAt !== undefined ? rivalSeen >= trial.input.visibleAt : undefined }))
+      }
+    } catch {
+      // decoration only: the verdict is printed regardless
+    }
     st.race = { input: trial.input, judgement: trial.judgement, verdict }
     const rank = (b: RaceInput['mine']) => `${b.name} rank ${b.rank} (${b.landed ? `block ${b.landed.block} round ${b.landed.pgaRound ?? '?'}` : 'block ?'}, tx_index ${b.landed?.index ?? '?'}, tip ${b.landed ? gwei(b.landed.tip) : '?'} gwei)`
     important(`YOUR TX: ranks: ${rank(trial.input.mine)}; ${rank(trial.input.rival)}`)
     if (raceExitCode(verdict) === 1) throw new Error(`the race FAILED: ${trial.reason.split('\n')[0]}`)
   } finally {
-    setInternalVisible(false)
+    await endHold(st).catch(() => {}) // never leave the simulator held (also after an error); the lease is the backstop
   }
 }
 
@@ -1678,12 +1983,15 @@ async function main(): Promise<number> {
   const keyFromEnv = feedApiKey() !== undefined
   const key = feedApiKey() ?? generateKey()
   const mine = newIdentity('mine', ANVIL_ACCOUNT_MAP.raceMine, key) // the key stays in memory: only its hash is ever printed
-  const st: State = { preset, stack: { attached: false, params: preset.local! }, mine, keyFromEnv, closingFeed: false, decoding: Promise.resolve(), rows: [], pauses: [] }
+  const paceAbort = new AbortController() // Ctrl-C ends a pending paced reveal at once
+  const pacer = new RowPacer({ enabled: rowPacingEnabled(process.stdout.isTTY, process.env), signal: paceAbort.signal })
+  const st: State = { preset, stack: { attached: false, params: preset.local! }, mine, keyFromEnv, closingFeed: false, decoding: Promise.resolve(), rows: [], pauses: [], pacer }
   let stop = async () => {}
 
   // Ctrl-C: stop the traffic, the feed connection and the stack we own (Anvil included), then exit 130.
   let interrupted = false
   const onSignal = () => {
+    paceAbort.abort()
     interrupted = true // from here no chapter failure is printed: the exit is always 130
     st.panel?.stop() // restores the cursor first (the panel also listens to the signal itself)
     void (async () => {
@@ -1753,7 +2061,7 @@ async function main(): Promise<number> {
       await run(c4, () => chapter4(st, { prompt: args.pause && isTTY ? () => waitEnterKey() : undefined }))
       await stopLive(st).catch(() => {}) // the live view and the traffic end with chapter 4, so the race starts quiet
     } else note('chapter 4 skipped: it needs the ticket from chapter 3')
-    if (!failed.has(3)) await run(c5, () => chapter5(st))
+    if (!failed.has(3)) await run(c5, () => chapter5(st, { prompt: args.pause && isTTY ? () => waitEnterKey() : undefined }))
     else note('chapter 5 skipped: it needs the ticket from chapter 3')
     await stopLive(st).catch(() => {})
     if (interrupted) return 130

@@ -256,40 +256,77 @@ test('E3 terse tables: one short note each, a row cap with "more", the position 
   assert.equal(noData.fcfsPosition, undefined)
 })
 
-// F1: the race block with and without Fast Feed.
-import { formatBlockComparison, comparisonSkipNote, FF_HEADING, NO_FF_HEADING, type BlockComparisonInput } from '../round2.ts'
+// F1/F3: the race block with and without Fast Feed.
+import { formatBlockComparison, comparisonSkipNote, fmtGain, FF_HEADING, NO_FF_HEADING, SEQUENCER_LATENCY_MS, type BlockComparisonInput } from '../round2.ts'
 
 const RIVAL = '0x0000000000000000000000000000000000000004' as Address
+const mRows = [row(21, 1, 0, '0.1', { blockNumber: 18, from: RIVAL, receivedAt: 25_000 }), row(22, 1, 1, '0.02', { blockNumber: 18, receivedAt: 25_010 })]
 const cmpInput = (o: Partial<BlockComparisonInput> = {}): BlockComparisonInput => ({
-  rows, visibleAt: 20_000, block: 17, blockMs: 2000, k: 2, roundMs: 1000, mine: new Set([ME.toLowerCase()]), rival: new Set([RIVAL]), columns: undefined, ...o,
+  rows: [...rows, ...mRows], visibleAt: 20_000, block: 17, rivalBlock: 18, blockMs: 2000, k: 2, roundMs: 1000, mine: new Set([ME.toLowerCase()]), rival: new Set([RIVAL]), columns: undefined, ...o,
+})
+const split = (t: string[]) => {
+  const i = t.indexOf(NO_FF_HEADING)
+  return { left: t.slice(0, i), right: t.slice(i) }
+}
+
+test('F3 fmtGain: simulated gain plus theoretical Arbitrum One ms (250/B), never positive, never -0.00s', () => {
+  assert.equal(fmtGain(12_570, 25_000), '-12.57s (-126 ms)')
+  assert.equal(fmtGain(14_970, 2000), '-14.97s (-1871 ms)')
+  assert.equal(fmtGain(0, 2000), '0.00s (0 ms)')
+  assert.equal(fmtGain(-500, 2000), '0.00s (0 ms)')
+  assert.equal(fmtGain(4, 2000), '0.00s (0 ms)')
+  assert.doesNotMatch(fmtGain(4, 2000), /-0\.00s/)
+  assert.equal(fmtGain(12_570, 25_000).startsWith('-'), true)
 })
 
-test('F1 stacked: headings in order, every line <= 80, negative gain equal to the negated FF lead', () => {
-  const t = text(formatBlockComparison(cmpInput()))
+test('F3 stacked: left = block N only with latency (vs no FF); right = block N then block M, +60ms, no rounds', () => {
+  const out = formatBlockComparison(cmpInput())
+  const t = text(out)
   assert.ok(t.indexOf(FF_HEADING) >= 0 && t.indexOf(FF_HEADING) < t.indexOf(NO_FF_HEADING))
-  assert.ok(maxCols(formatBlockComparison(cmpInput())) <= 80)
-  const left = t.slice(0, t.indexOf(NO_FF_HEADING)), right = t.slice(t.indexOf(NO_FF_HEADING))
+  assert.ok(maxCols(out) <= 80)
+  const { left, right } = split(t)
+  const L = left.join('\n'), R = right.join('\n')
   assert.ok(left.some((l) => l.startsWith('round 1 — ')) && left.some((l) => l.startsWith('round 2 — ')))
-  assert.match(left.join('\n'), /· 3 txs/)
-  const xl = left.find((l) => l.includes('<- yours'))!
-  assert.match(xl, /-14\.97s/) // visible 20000 - received 5030
-  assert.equal(`-${((20_000 - xRow.receivedAt) / 1000).toFixed(2)}s`, '-14.97s')
-  for (const l of left) assert.doesNotMatch(l, /\+\d+\.\d\ds/)
+  assert.match(L, /· 3 txs/)
+  assert.match(L, /latency \(vs no FF\)/)
+  assert.equal(left.filter((l) => l.startsWith('block ')).length, 1, 'no block M on the left')
+  assert.ok(!L.includes('block 18'))
+  assert.match(left.find((l) => l.includes('<- yours'))!, /-14\.97s \(-1871 ms\)/) // visible 20000 - received 5030
+  for (const l of left) assert.doesNotMatch(l, /\+\d+/)
+  // right
+  assert.deepEqual(right.filter((l) => l.startsWith('block ')).map((l) => l.slice(0, 9)), ['block 17 ', 'block 18 '])
+  assert.ok(right.findIndex((l) => l.startsWith('block 17')) < right.findIndex((l) => l.startsWith('block 18')))
+  assert.match(right.find((l) => l.trim().startsWith('idx'))!, /^ {3}idx +from +tip +latency$/)
+  const dataRows = right.filter((l) => /^ {3}\d+ /.test(l))
+  assert.equal(dataRows.length, 8)
+  for (const l of dataRows) assert.match(l, new RegExp(`\\+${SEQUENCER_LATENCY_MS}ms`))
+  assert.equal(SEQUENCER_LATENCY_MS, 60)
   assert.ok(right.some((l) => l.includes('<- yours')))
-  assert.ok(!right.join('\n').includes('vs no FF') && !right.join('\n').includes('round'))
-  assert.equal(right.filter((l) => /^ {3}\d+ /.test(l)).length, 6)
+  assert.ok(right.slice(right.findIndex((l) => l.startsWith('block 18'))).some((l) => l.includes('<- rival')))
+  assert.ok(!/vs no FF|round|-\d+\.\d\ds/.test(R))
 })
 
-test('F1 rival marker and 160-column side by side', () => {
-  const rv = rows.map((r) => (r.txIndex === 4 ? { ...r, from: RIVAL } : r))
+test('F3 rival in the same block or without rows: right shows only block N', () => {
+  for (const o of [{ rivalBlock: 17 }, { rivalBlock: undefined }, { rivalBlock: 19 }]) {
+    const { right } = split(text(formatBlockComparison(cmpInput(o))))
+    assert.equal(right.filter((l) => l.startsWith('block ')).length, 1)
+    assert.equal(right.filter((l) => /^ {3}\d+ /.test(l)).length, 6)
+  }
+  const none = formatBlockComparison(cmpInput({ rivalBlock: 19 }))
+  assert.ok(none.every((l) => l.kind !== 'note'))
+})
+
+test('F3 160-column side by side and 159 stacked', () => {
+  const rv = [...rows.map((r) => (r.txIndex === 4 ? { ...r, from: RIVAL } : r)), ...mRows]
   const out = formatBlockComparison(cmpInput({ rows: rv, columns: 160 }))
   assert.ok(maxCols(out) <= 160)
   assert.ok(text(out)[0]!.includes(FF_HEADING) && text(out)[0]!.includes(NO_FF_HEADING))
   const col = text(out)[0]!.indexOf(NO_FF_HEADING)
   assert.equal(col, 80)
   assert.ok(text(out).some((l) => l.includes('<- rival') && l.indexOf('<- rival') > col), 'rival marked on the right')
-  assert.ok(text(out).some((l) => l.slice(0, col).includes('<- rival')), 'rival marked on the left')
+  assert.ok(text(out).some((l) => l.slice(0, col).includes('<- yours')))
   assert.ok(text(out).some((l) => l.slice(col).includes('<- yours')))
+  assert.ok(text(out).some((l) => l.slice(col).startsWith('block 18')))
   const stacked = formatBlockComparison(cmpInput({ rows: rv, columns: 159 }))
   assert.ok(text(stacked)[0] === FF_HEADING && maxCols(stacked) <= 80)
 })
@@ -300,4 +337,100 @@ test('F1 missing data gives one skip NOTE', () => {
   const unseen = formatBlockComparison(cmpInput({ visibleAt: undefined }))
   assert.ok(unseen.every((l) => l.kind === 'note') && maxCols(unseen) <= 80)
   assert.deepEqual(text(comparisonSkipNote('x')), ['NOTE: Comparison with and without Fast Feed skipped: x.'])
+})
+
+// F5: the comparison in three stages and the sequencer summary.
+import { formatComparisonStage, formatSequencerSummary } from '../round2.ts'
+
+test('F5 stage 1: only round 1 on the left, the gain pending, no right side; stage 3 of formatBlockComparison is the unstaged output', () => {
+  const t = text(formatComparisonStage(cmpInput(), 1))
+  assert.equal(t[0], FF_HEADING)
+  assert.ok(t.some((l) => l.startsWith('round 1 — ')))
+  assert.ok(!t.some((l) => l.startsWith('round 2 — ')), 'no round 2 yet')
+  assert.ok(!t.includes(NO_FF_HEADING) && !t.some((l) => l.includes('+60ms')), 'no right side')
+  assert.ok(t.some((l) => /latency \(vs no FF\)/.test(l)) && t.some((l) => l.includes('pending')))
+  assert.ok(!t.some((l) => l.includes('<- yours')), 'mine is in round 2')
+  assert.ok(maxCols(formatComparisonStage(cmpInput({ columns: 200 }), 1)) <= 80, 'stacked even on a wide terminal')
+  assert.deepEqual(text(formatBlockComparison(cmpInput())), text(formatBlockComparison(cmpInput(), 3)))
+})
+
+test('F5 stage 2: round 2 on the left (gain measured) and the whole block N on the right; stage 3 adds block M on the right only', () => {
+  const s2 = formatComparisonStage(cmpInput(), 2)
+  const t = text(s2)
+  assert.match(t[0]!, /^NOTE: round 1 again/)
+  assert.ok(t.some((l) => l.startsWith('round 2 — ')))
+  const iRight = t.indexOf(NO_FF_HEADING)
+  assert.ok(iRight > 0)
+  const left = t.slice(0, iRight).join('\n'), right = t.slice(iRight)
+  assert.match(left, /-\d+\.\d\ds \(-\d+ ms\)/)
+  assert.ok(!left.includes('pending'))
+  assert.equal(right.filter((l) => /^ {3}\d+ /.test(l)).length, 6, 'the whole block N, no rounds')
+  assert.ok(right.every((l) => !/round \d/.test(l)) && right.some((l) => l.includes('<- yours')))
+  assert.ok(!right.some((l) => l.startsWith('block 18')), 'no block M yet')
+  assert.ok(maxCols(s2) <= 80)
+  const s3 = formatComparisonStage(cmpInput(), 3)
+  const t3 = text(s3)
+  assert.ok(!t3.includes(FF_HEADING) && !t3.includes(NO_FF_HEADING) && !t3.some((l) => l.startsWith('round ')), 'right side only, nothing on the left')
+  assert.ok(t3.some((l) => l.startsWith('block 18 — ')) && t3.some((l) => l.includes('<- rival')))
+  assert.ok(!t3.some((l) => l.startsWith('block 17')))
+  assert.ok(maxCols(s3) <= 80)
+  assert.ok(t3.every((l) => !/-\d+\.\d\ds/.test(l)), 'no gain on the right')
+})
+
+test('F5 stages: cumulative side by side from 160 columns; stage 3 says nothing when block M is the same or has no rows; skip NOTE unchanged', () => {
+  const one = formatBlockComparison(cmpInput({ columns: 160 }), 1)
+  assert.ok(text(one).every((l) => !l.includes(NO_FF_HEADING)))
+  const two = formatBlockComparison(cmpInput({ columns: 160 }), 2)
+  assert.ok(maxCols(two) <= 160 && text(two)[0]!.includes(NO_FF_HEADING) && !text(two).some((l) => l.includes('block 18')))
+  assert.ok(text(formatBlockComparison(cmpInput({ columns: 160 }), 3)).some((l) => l.slice(80).startsWith('block 18')))
+  for (const o of [{ rivalBlock: 17 }, { rivalBlock: undefined }, { rivalBlock: 19 }]) assert.deepEqual(formatComparisonStage(cmpInput(o), 3), [])
+  const noRows = formatComparisonStage(cmpInput({ rows: [] }), 1)
+  assert.deepEqual(text(noRows), text(comparisonSkipNote('the Fast Feed connection saw no transactions of block 17')))
+  assert.ok(formatComparisonStage(cmpInput({ visibleAt: undefined }), 2).every((l) => l.kind === 'note'))
+  assert.ok(formatComparisonStage(cmpInput({ visibleAt: undefined }), 1).some((l) => l.text.includes('pending')), 'stage 1 needs no visible time')
+})
+
+test('F5 sequencer summary: at most 3 NOTE lines within 80 columns, from observed rows only', () => {
+  const OP = '0x00000000000000000000000000000000000000a0' as Address
+  const r1 = [row(30, 1, 0, '0.05', { blockNumber: 12 }), row(31, 1, 1, '0.01', { blockNumber: 12, from: OP })]
+  const mine = row(32, 2, 2, '0.2', { blockNumber: 12, from: ME })
+  const extras = [row(33, 2, 3, '0.045', { blockNumber: 12 }), row(34, 2, 4, '0.015', { blockNumber: 12 })]
+  const rival = row(35, 1, 0, '0.1', { blockNumber: 13, from: RIVAL })
+  const input = { block: 12, rows: [...r1, mine, ...extras, rival], operator: new Set([OP]), mine: new Set([ME.toLowerCase()]), rival: new Set([RIVAL]), rivalSawAfterSealed: true }
+  const out = formatSequencerSummary(input)
+  assert.equal(out.length, 3)
+  for (const l of out) assert.ok(l.kind === 'note' && l.text.startsWith('NOTE: ') && l.text.indexOf('NOTE:', 1) === -1 && [...l.text].length <= 80, l.text)
+  assert.equal(text(out)[0], 'NOTE: round 1 of block 12: open at position 2 of 2 (1 before, 0 after).')
+  // open first: "then"; open in the middle: before / after counts, never "then"
+  const first = text(formatSequencerSummary({ ...input, rows: [row(40, 1, 0, '0.5', { blockNumber: 12, from: OP }), row(41, 1, 1, '0.05', { blockNumber: 12 }), row(42, 1, 2, '0.01', { blockNumber: 12 })] }))
+  assert.equal(first[0], 'NOTE: round 1 of block 12: open first, then 2 txs (0.05-0.01 gwei).')
+  const mid = text(formatSequencerSummary({ ...input, rows: [row(43, 1, 0, '0.05', { blockNumber: 12 }), row(44, 1, 1, '0.01', { blockNumber: 12, from: OP }), row(45, 1, 2, '0.01', { blockNumber: 12 })] }))
+  assert.equal(mid[0], 'NOTE: round 1 of block 12: open at position 2 of 3 (1 before, 1 after).')
+  assert.ok(!mid[0]!.includes('then') && mid[0]!.length <= 80)
+  assert.equal(text(out)[1], 'NOTE: round 2: mine (0.2 gwei) first, then 2 txs at lower tips (0.045-0.015).')
+  assert.equal(text(out)[2], 'NOTE: rival (polling) saw open only after block 12 sealed: block 13 round 1.')
+  // not claimed when not observed
+  assert.match(text(formatSequencerSummary({ ...input, rivalSawAfterSealed: undefined }))[2]!, /^NOTE: rival \(polling\) landed in block 13 round 1\.$/)
+  // same block: said as such, never "after sealed"
+  const same = text(formatSequencerSummary({ ...input, rows: [...r1, mine, ...extras, row(36, 2, 5, '0.1', { blockNumber: 12, from: RIVAL })] }))
+  assert.match(same[2]!, /^NOTE: the rival landed in the same block 12: block 12 round 2, tx_index 5\.$/)
+  assert.ok(!same.join('\n').includes('sealed'))
+  // mine not first / missing data: lines left out
+  const behind = text(formatSequencerSummary({ ...input, rows: [row(37, 2, 2, '0.5', { blockNumber: 12 }), { ...mine, txIndex: 3 }], rival: new Set(), operator: new Set() }))
+  assert.deepEqual(behind, ['NOTE: round 2: mine (0.2 gwei) at position 2 of 2.'])
+  assert.deepEqual(formatSequencerSummary({ ...input, rows: [] }), [])
+})
+
+test('F6 formatComparisonStage flags the table rows shown for the first time: stage 1 round 1, stage 2 only the later rounds; text is unchanged', () => {
+  const s1 = formatComparisonStage(cmpInput(), 1)
+  const rows1 = s1.filter((l) => l.row)
+  assert.equal(rows1.length, 3, 'round 1 has 3 rows')
+  assert.ok(s1.indexOf(rows1[0]!) === 4 && s1.slice(4).every((l) => l.row), 'rows follow FF heading, block header, round header, column header')
+  const s2 = formatComparisonStage(cmpInput(), 2)
+  const flagged = s2.filter((l) => l.row)
+  assert.equal(flagged.length, 3, 'round 2 rows only: the round 1 reprint and the right side are not paced')
+  assert.ok(flagged.every((l) => l.text.length > 0))
+  const i2 = s2.findIndex((l) => l.text.startsWith('round 2 — '))
+  assert.ok(s2[i2 + 1]!.row !== true && s2[i2 + 2]!.row === true, 'header and column header are not rows')
+  assert.ok(!formatComparisonStage(cmpInput(), 3).some((l) => l.row), 'stage 3 is not paced')
 })

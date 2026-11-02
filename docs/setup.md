@@ -29,7 +29,7 @@ Every command except `sim` (local-only) and `key:new` (no network) needs exactly
 | Chain | Anvil, chainId 31337 | Arbitrum Sepolia, chainId 421614 |
 | Sequencer | our mock, `http://127.0.0.1:8547` | the real sequencer endpoint |
 | Fast Feed | our mock, `ws://127.0.0.1:9642` | `wss://sepolia-rollup-txfeed.arbitrum.io` |
-| Cost | free | needs testnet ETH and (later) TEST tokens |
+| Cost | free | needs testnet ETH and (later) the Sepolia test token |
 | Timing | slowed down so you can see it (block 2000ms by default) | real (Arbitrum One uses 250ms blocks) |
 
 `--local` prints a banner with every value that differs from Arbitrum One. The testnet quickstart arrives in a later phase.
@@ -41,7 +41,7 @@ Other things that differ locally (so you are not surprised):
 
 ## Solidity libraries
 
-The contracts (the vendored Fast Feed `Tickets` contract, a local TEST token) build against forge-std and OpenZeppelin v5.6.1, kept as git submodules in `lib/`. `npm run sim` (and every command that starts the stack) runs `forge build`, and first fetches `lib/` if it is empty (`git submodule update --init`, falling back to `forge install --no-git`). Do it by hand with:
+The contracts (the vendored Fast Feed `Tickets` contract, a local USDGTest token) build against forge-std and OpenZeppelin v5.6.1, kept as git submodules in `lib/`. `npm run sim` (and every command that starts the stack) runs `forge build`, and first fetches `lib/` if it is empty (`git submodule update --init`, falling back to `forge install --no-git`). Do it by hand with:
 
 ```bash
 git submodule update --init

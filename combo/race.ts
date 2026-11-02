@@ -113,7 +113,7 @@ async function fundBots(ctxs: readonly TicketsCtx[], need: bigint): Promise<void
   await Promise.all(ctxs.map(async (c) => {
     const { wallet, deposited } = await balances(c)
     const toDeposit = need > deposited ? need - deposited : 0n
-    if (toDeposit > wallet) await mintLocal(c, toDeposit - wallet)
+    if (toDeposit > wallet) await mintLocal({ ...c, quiet: true }, toDeposit - wallet) // never narrated: the local wallet funding is a simulator detail, not a ticket step
   }))
   await Promise.all(ctxs.map(async (c) => {
     const { deposited } = await balances(c)
@@ -134,7 +134,7 @@ export interface TicketStepOptions {
 
 /**
  * Buy one ticket for each bot's key (each from its own wallet), then wait until both are active. Local only: it
- * mints TEST (public mint). Both purchases must land in the same ticket round, so that both tickets are active in
+ * funds the wallets with the local USDGTest (a quiet public mint). Both purchases must land in the same ticket round, so that both tickets are active in
  * the same following round; if the round rolls over between them, the earlier one is bought again.
  * Prints only the key hashes.
  */
@@ -146,8 +146,7 @@ export async function buyTickets(preset: Preset, bots: readonly BotIdentity[], o
   const first = await readRound(ctxs[0]!)
   const need = first.price * BigInt(BUDGET_TICKETS * TICKETS_PER_BOT)
   if (!q) {
-    step(`${who(bots)} mint TEST (${fmtToken(need)}${bots.length > 1 ? ' each' : ''}), approve and deposit it`)
-    note('Local only: the local TEST has a public mint.')
+    step(`${who(bots)} approve and deposit ${fmtToken(need)}${bots.length > 1 ? ' each' : ''}`)
   }
   await fundBots(ctxs, need)
 

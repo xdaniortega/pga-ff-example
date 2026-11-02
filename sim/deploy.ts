@@ -1,5 +1,5 @@
 // Deploys the Fast Feed ticket stack (and the C1 Race contract) onto the local chain at stack start:
-//   TEST (local 6-decimals ERC20) + Tickets implementation + TransparentUpgradeableProxy(initialize).
+//   USDGTest (local 6-decimals ERC20) + Tickets implementation + TransparentUpgradeableProxy(initialize).
 // Pattern: github.com/OffchainLabs/feed-ticket-contracts bot/test/bot.test.ts (ERC20 + impl + proxy, firstRoundStart = latest block + lead).
 // Admin, roles and beneficiary are Anvil dev account 9 (LOCAL_ADMIN_KEY), keeping accounts 0-2 free for users.
 // Parameters come only from shared/config.ts (LocalParams.tickets).

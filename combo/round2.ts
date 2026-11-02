@@ -16,6 +16,8 @@ export const WIDTH = 80
 export interface OutLine {
   text: string
   kind: 'plain' | 'note' | 'important'
+  /** F6: a Fast Feed table row that is shown for the first time (the demo reveals such rows one by one on a terminal; see pacing.ts). */
+  row?: true
 }
 
 /** `sim_arrivals` record: when the sequencer received a tx (local simulator data, Arbitrum does not publish it). */
@@ -300,14 +302,24 @@ export interface BlockComparisonInput {
   /** Lower-case addresses marked `<- yours` / `<- rival`. */
   mine: ReadonlySet<string>
   rival: ReadonlySet<string>
+  /** F3: the block that holds the rival's claim (the poller learns of `open` only after block `block` is sealed). Shown on the right when it differs from `block` and its rows exist. */
+  rivalBlock?: number
   /** process.stdout.columns, undefined when not a terminal. */
   columns: number | undefined
 }
 
-/** Pure: the time gained on a user without Fast Feed, always printed negative: `-12.61s` (`0.00s` for none). */
-export function fmtGain(leadMs: number): string {
-  const s = Math.max(0, leadMs) / 1000
-  return s === 0 ? '0.00s' : `-${s.toFixed(2)}s`
+/** F3 (assumption): the sequencer-to-RPC latency a user without Fast Feed pays, shown on every right-side row. */
+export const SEQUENCER_LATENCY_MS = 60
+
+/**
+ * Pure: the time gained on a user without Fast Feed, always printed negative, with the theoretical Arbitrum One value
+ * (the same gain scaled by 250 ms / B): `-12.57s (-126 ms)`; `0.00s (0 ms)` for none. Rounded to centiseconds first, so never `-0.00s`.
+ */
+export function fmtGain(leadMs: number, blockMs: number = ARBITRUM_BLOCK_MS): string {
+  const gain = Math.max(0, leadMs)
+  const cs = Math.round(gain / 10)
+  const ms = Math.round((gain * ARBITRUM_BLOCK_MS) / blockMs)
+  return cs === 0 ? '0.00s (0 ms)' : `-${(cs / 100).toFixed(2)}s (${ms === 0 ? '0' : `-${ms}`} ms)`
 }
 
 /** Pure: one skip NOTE (the comparison never changes a verdict). */
@@ -322,43 +334,158 @@ function viewTable(head: string[], body: string[][], marks: string[]): string[] 
   return [`   ${cells(head)}`.trimEnd(), ...body.map((r, i) => `   ${cells(r)}${marks[i]}`)]
 }
 
-/**
- * Pure: the race's own block twice. Left: with Fast Feed, per round (round header, index/from/tip and the time gained versus
- * no Fast Feed = -(block visible on the RPC - feed receivedAt)). Right: the sealed block as the RPC shows it, one table in final
- * order, no rounds, no gain. Side by side from 160 columns, else stacked (left first). Without rows or a visible time: one NOTE.
- */
-export function formatBlockComparison(i: BlockComparisonInput): OutLine[] {
-  const rows = [...i.rows].filter((r) => r.blockNumber === i.block).sort((a, b) => a.txIndex - b.txIndex)
-  if (rows.length === 0) return comparisonSkipNote(`the Fast Feed connection saw no transactions of block ${i.block}`)
-  if (i.visibleAt === undefined) return comparisonSkipNote(`block ${i.block} was not seen on the RPC, so the time gained cannot be measured`)
-  const visibleAt = i.visibleAt
+/** F5: which part of the comparison is shown: 1 = round 1 on the left only; 2 = + round 2 on the left and the whole block N on the right; 3 = + block M on the right. */
+export type ComparisonStage = 1 | 2 | 3
+
+interface ComparisonViews {
+  header: string
+  /** One section per round of block N (its round header, then its table). */
+  rounds: string[][]
+  /** The round number of each section of `rounds`. */
+  roundNos: number[]
+  /** The right view of block N: header and table. */
+  right: string[]
+  /** The right view of the rival's block M: header and table (empty when there is none). */
+  rivalBlock: string[]
+}
+
+/** Pure: the lines of every part of the comparison. `visibleAt` undefined = the latency is not measurable yet (stage 1). */
+function comparisonViews(i: BlockComparisonInput, rows: readonly LiveRow[], visibleAt: number | undefined): ComparisonViews {
   const mark = (r: LiveRow) => (r.from !== null && i.mine.has(lc(r.from)) ? '  <- yours' : r.from !== null && i.rival.has(lc(r.from)) ? '  <- rival' : '')
   const from = (r: LiveRow) => (r.from ? shortAddr(r.from) : '(undecodable)')
   const header = blockHeaderLine(i.block, i.blockMs)
-
-  const left: string[] = [header]
-  const rounds = [...new Set(rows.map((r) => r.pgaRound ?? 1))].sort((a, b) => a - b)
-  rounds.forEach((rd, n) => {
+  const latency = `+${SEQUENCER_LATENCY_MS}ms`
+  const roundNos = [...new Set(rows.map((r) => r.pgaRound ?? 1))].sort((a, b) => a - b)
+  const rounds = roundNos.map((rd) => {
     const rr = rows.filter((r) => (r.pgaRound ?? 1) === rd)
-    if (n > 0) left.push('')
-    left.push(`${roundHeaderLine(rd, i.k, i.roundMs)} · ${rr.length} tx${rr.length === 1 ? '' : 's'}`)
-    left.push(...viewTable(['idx', 'from', 'tip', 'vs no FF'], rr.map((r) => [String(r.txIndex), from(r), fmtGwei(r.effectiveTip), fmtGain(visibleAt - r.receivedAt)]), rr.map(mark)))
+    return [
+      `${roundHeaderLine(rd, i.k, i.roundMs)} · ${rr.length} tx${rr.length === 1 ? '' : 's'}`,
+      ...viewTable(['idx', 'from', 'tip', 'latency (vs no FF)'], rr.map((r) => [String(r.txIndex), from(r), fmtGwei(r.effectiveTip), visibleAt === undefined ? 'pending' : fmtGain(visibleAt - r.receivedAt, i.blockMs)]), rr.map(mark)),
+    ]
   })
-  const right: string[] = [header, ...viewTable(['idx', 'from', 'tip'], rows.map((r) => [String(r.txIndex), from(r), fmtGwei(r.effectiveTip)]), rows.map(mark))]
+  const noFfTable = (rs: readonly LiveRow[]) => viewTable(['idx', 'from', 'tip', 'latency'], rs.map((r) => [String(r.txIndex), from(r), fmtGwei(r.effectiveTip), latency]), rs.map(mark))
+  const rivalRows = i.rivalBlock !== undefined && i.rivalBlock !== i.block ? [...i.rows].filter((r) => r.blockNumber === i.rivalBlock).sort((a, b) => a.txIndex - b.txIndex) : []
+  return { header, rounds, roundNos, right: [header, ...noFfTable(rows)], rivalBlock: rivalRows.length > 0 ? [blockHeaderLine(i.rivalBlock!, i.blockMs), ...noFfTable(rivalRows)] : [] }
+}
 
+/** Pure: the sorted rows of block N, or the skip NOTE (stage 2 and later also need the visible time). */
+function comparisonRows(i: BlockComparisonInput, stage: ComparisonStage): { rows: LiveRow[] } | { skip: OutLine[] } {
+  const rows = [...i.rows].filter((r) => r.blockNumber === i.block).sort((a, b) => a.txIndex - b.txIndex)
+  if (rows.length === 0) return { skip: comparisonSkipNote(`the Fast Feed connection saw no transactions of block ${i.block}`) }
+  if (stage >= 2 && i.visibleAt === undefined) return { skip: comparisonSkipNote(`block ${i.block} was not seen on the RPC, so the time gained cannot be measured`) }
+  return { rows }
+}
+
+/**
+ * Pure: the race's own block twice, as far as `stage` (default 3 = everything, F3). Left: with Fast Feed, per round (round header,
+ * index/from/tip and the time gained versus no Fast Feed = -(block visible on the RPC - feed receivedAt); stage 1 shows only the
+ * first round, with the gain still "pending": the block is not sealed yet). Right (stage 2 on): the sealed block as the RPC shows it,
+ * one table in final order, no rounds, no gain; stage 3 adds the rival's block M under it. Side by side from 160 columns, else
+ * stacked (left first). Without rows (or, from stage 2, without a visible time): one NOTE.
+ */
+export function formatBlockComparison(i: BlockComparisonInput, stage: ComparisonStage = 3): OutLine[] {
+  const got = comparisonRows(i, stage)
+  if ('skip' in got) return got.skip
+  const v = comparisonViews(i, got.rows, stage >= 2 ? i.visibleAt : undefined)
+  const left = [v.header, ...v.rounds.slice(0, stage === 1 ? 1 : undefined).flatMap((r, n) => (n > 0 ? ['', ...r] : r))]
+  const right = stage === 1 ? [] : [...v.right, ...(stage === 3 && v.rivalBlock.length > 0 ? ['', ...v.rivalBlock] : [])]
   const out: OutLine[] = []
   if (i.columns !== undefined && i.columns >= SIDE_BY_SIDE_MIN) {
     const cut = (s: string, w: number) => (s.length <= w ? s : `${s.slice(0, w - 1)}…`)
     const l = [FF_HEADING, ...left]
-    const r = [NO_FF_HEADING, ...right]
+    const r = right.length > 0 ? [NO_FF_HEADING, ...right] : []
     for (let j = 0; j < Math.max(l.length, r.length); j++) {
       out.push({ text: `${cut(l[j] ?? '', LEFT_COL).padEnd(LEFT_COL)}    ${cut(r[j] ?? '', WIDTH)}`.trimEnd(), kind: 'plain' })
     }
   } else {
     out.push({ text: FF_HEADING, kind: 'important' }, ...left.map((t) => ({ text: fit(t), kind: 'plain' as const })))
-    out.push({ text: '', kind: 'plain' }, { text: NO_FF_HEADING, kind: 'important' }, ...right.map((t) => ({ text: fit(t), kind: 'plain' as const })))
+    if (right.length > 0) out.push({ text: '', kind: 'plain' }, { text: NO_FF_HEADING, kind: 'important' }, ...right.map((t) => ({ text: fit(t), kind: 'plain' as const })))
   }
   return out
+}
+
+/**
+ * Pure (F5): what a staged run prints NEW at `stage`, stacked, every line within 80 columns (the unstaged `formatBlockComparison` is
+ * stages 1 + 2 + 3 at once). Stage 1: the left heading, block N's header and round 1. Stage 2: round 1 again with the gain now measured,
+ * round 2, then the right view of the whole block N. Stage 3: block M (the rival's claim) under it, on the right only; nothing when
+ * there is no such block.
+ */
+export function formatComparisonStage(i: BlockComparisonInput, stage: ComparisonStage): OutLine[] {
+  if (stage === 1) {
+    // F6: the rows of round 1 (after FF heading, block header, round header and column header) are flagged for the paced reveal.
+    const out = formatBlockComparison({ ...i, columns: undefined }, 1)
+    return out[0]?.text === FF_HEADING ? out.map((l, n) => (n >= 4 ? { ...l, row: true as const } : l)) : out
+  }
+  const got = comparisonRows(i, stage)
+  if ('skip' in got) return stage === 3 ? [] : got.skip
+  const v = comparisonViews(i, got.rows, i.visibleAt)
+  const plainOf = (lines: readonly string[]): OutLine[] => lines.map((t) => ({ text: fit(t), kind: 'plain' as const }))
+  if (stage === 3) return v.rivalBlock.length > 0 ? plainOf(['', ...v.rivalBlock]) : []
+  return [
+    ...noteOf(`round 1 again, now that block ${i.block} is sealed and the gain can be measured.`),
+    // F6: round 1 was already shown in stage 1 (its reprint is not paced); the rows of any later round are shown for the first time.
+    ...v.rounds.flatMap((r, n) => [...(n > 0 ? plainOf(['']) : []), ...plainOf(r).map((l, k) => (k >= 2 && v.roundNos[n] !== 1 ? { ...l, row: true as const } : l))]),
+    { text: '', kind: 'plain' },
+    { text: NO_FF_HEADING, kind: 'important' },
+    ...plainOf(v.right),
+  ]
+}
+
+/** Input of the sequencer summary: only data the demo observed (feed rows, where the claims landed, when the rival saw `open`). */
+export interface SequencerSummaryInput {
+  /** The race's block N (the one with `open`). */
+  block: number
+  /** Feed rows of block N and of the rival's block (any order). */
+  rows: readonly LiveRow[]
+  operator: ReadonlySet<string>
+  mine: ReadonlySet<string>
+  rival: ReadonlySet<string>
+  /** True when the polling rival's own sighting of `open` came after block N was visible on the RPC. */
+  rivalSawAfterSealed?: boolean
+}
+
+/**
+ * Pure (F5): at most 3 NOTE lines (each within 80 columns) on what the sequencer did in the race's blocks, from observed rows only:
+ * round 1 (open and the others), round 2 (where mine's claim was and what followed) and where the polling rival landed. A line is
+ * left out when its data was not observed; a rival in the same block is said as such.
+ */
+export function formatSequencerSummary(i: SequencerSummaryInput): OutLine[] {
+  const own = (r: LiveRow, set: ReadonlySet<string>) => r.from !== null && set.has(lc(r.from))
+  const inBlock = (b: number) => [...i.rows].filter((r) => r.blockNumber === b).sort((a, b2) => a.txIndex - b2.txIndex)
+  const round = (rows: readonly LiveRow[], n: number) => rows.filter((r) => (r.pgaRound ?? 1) === n)
+  const num = (t: bigint) => fmtGwei(t).replace(/ gwei$/, '')
+  const range = (rs: readonly LiveRow[]) => {
+    const tips = rs.map((r) => r.effectiveTip)
+    const hi = tips.reduce((a, b) => (b > a ? b : a))
+    const lo = tips.reduce((a, b) => (b < a ? b : a))
+    return hi === lo ? num(hi) : `${num(hi)}-${num(lo)}`
+  }
+  const lines: string[] = []
+  const n = inBlock(i.block)
+  const r1 = round(n, 1)
+  const open = r1.findIndex((r) => own(r, i.operator))
+  if (open >= 0) {
+    const others = r1.filter((_, k) => k !== open)
+    const many = (k: number) => `${k} tx${k === 1 ? '' : 's'}`
+    // "then" only when open really is first; otherwise say how many came before and after it.
+    const tail = open === 0 ? (others.length > 0 ? `, then ${many(others.length)} (${range(others)} gwei)` : '') : ` (${open} before, ${r1.length - open - 1} after)`
+    lines.push(`round 1 of block ${i.block}: open ${open === 0 ? 'first' : `at position ${open + 1} of ${r1.length}`}${tail}.`)
+  }
+  const mineRow = n.find((r) => own(r, i.mine))
+  if (mineRow) {
+    const rd = round(n, mineRow.pgaRound ?? 1)
+    const pos = rd.indexOf(mineRow)
+    const after = rd.slice(pos + 1)
+    const lower = after.length > 0 && after.every((r) => r.effectiveTip < mineRow.effectiveTip)
+    lines.push(`round ${mineRow.pgaRound ?? 1}: mine (${fmtGwei(mineRow.effectiveTip)}) ${pos === 0 ? 'first' : `at position ${pos + 1} of ${rd.length}`}${after.length > 0 ? `, then ${after.length} tx${after.length === 1 ? '' : 's'} ${lower ? 'at lower tips ' : ''}(${range(after)})` : ''}.`)
+  }
+  const rivalRow = [...i.rows].find((r) => own(r, i.rival))
+  if (rivalRow) {
+    const where = `block ${rivalRow.blockNumber}${rivalRow.pgaRound !== undefined ? ` round ${rivalRow.pgaRound}` : ''}`
+    if (rivalRow.blockNumber === i.block) lines.push(`the rival landed in the same block ${i.block}: ${where}, tx_index ${rivalRow.txIndex}.`)
+    else lines.push(`rival (polling) ${i.rivalSawAfterSealed ? `saw open only after block ${i.block} sealed: ` : 'landed in '}${where}.`)
+  }
+  return lines.slice(0, 3).map((t) => ({ text: fit(`NOTE: ${t}`), kind: 'note' as const }))
 }
 
 // ---------------------------------------------------------------------------

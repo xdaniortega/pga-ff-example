@@ -433,6 +433,21 @@ export interface TrialOptions {
   pollMs?: number
   /** F1: receives every feed message of mine's own connection. */
   onMineFeed?: (msg: FeedMessageJson, receivedAt: number) => void
+  /** F3: called (not awaited) right after `open` was sent. Must never throw into the trial. */
+  onOpenSent?: () => void
+  /** F3: called (not awaited) when the block holding `open` became visible on the RPC (F5: with the wall time it was first seen). Must never throw into the trial. */
+  onOpenBlockVisible?: (visibleAt: number) => void
+  /** F6: awaited (best effort) before the `both claims are sent` line, so it cannot land inside a paced table the demo is still revealing. */
+  beforeClaimsLine?: () => Promise<void>
+  /** F5: awaited right before `open` is sent (after the block-start sync): the demo arms the simulator's hold here. Errors are swallowed. */
+  beforeOpenSent?: () => Promise<void>
+  /**
+   * F5: awaited once mine's claim was accepted (with the block of `open` as mine saw it), BEFORE the rival is waited for: the demo shows
+   * round 1 here while the simulator is held, then resumes it. The rival's wait (and its timeout) starts after this returns. Errors are swallowed.
+   */
+  afterMineSent?: (openBlock: number | undefined) => Promise<void>
+  /** F5: maps a wall time to the demo's pause-free time line (the holds taken out); applied to every time the trial reports. */
+  retime?: (t: number) => number
 }
 
 const OPEN_TIMEOUT_MS = 30_000
@@ -506,9 +521,14 @@ export async function runTrial(rc: RaceContext, sc: Scenario, opts: TrialOptions
   const send = (raw: Hex) => env.send.sendRawTransaction({ serializedTransaction: raw })
   // Measured, not assumed: when does the block that holds `open` become visible on the RPC? Starts when mine sees Opened.
   let visible: Promise<number | undefined> | undefined
-  const onSeen = (block: number) => {
-    visible ??= waitBlockVisible(rc.preset.rpcUrl, block, 20_000, PROBE_MS) // a fine probe: it is compared with the polling rival's sighting
+  let deferredBlock: number | undefined
+  const startProbe = (block: number) => {
+    if (visible) return
+    visible = waitBlockVisible(rc.preset.rpcUrl, block, 20_000, PROBE_MS) // a fine probe: it is compared with the polling rival's sighting
+    void visible.then((t) => { if (t !== undefined) try { opts.onOpenBlockVisible?.(t) } catch { /* best effort */ } }, () => {})
   }
+  // F5: with a hook that may hold the simulator (and wait for Enter), the probe's own deadline must not run meanwhile: it starts after the hook.
+  const onSeen = (block: number) => (opts.afterMineSent ? void (deferredBlock ??= block) : startProbe(block))
   const feedBot = (b: BotIdentity, raw: Hex, delayMs: number) => new ClaimBot({ name: b.name, feedUrl: rc.preset.feedUrl, apiKey: b.key, race, id, delayMs, raw, send, onSeen: b.name === 'mine' ? onSeen : undefined, onFeedMessage: b.name === 'mine' ? opts.onMineFeed : undefined })
   const rival: RaceBot =
     sc.rivalVia === 'poll'
@@ -523,20 +543,32 @@ export async function runTrial(rc: RaceContext, sc: Scenario, opts: TrialOptions
     // Local only: send `open` right after a block STARTS, so it lands in round 1 and a claim made on the feed lands in round 2 of the
     // same block. A poller sees the block only once it is final (after round 2), so it can never share mine's round by accident.
     if (rc.preset.mode === 'local') await syncToBlockStart(rc.preset.sendUrl)
+    try { await opts.beforeOpenSent?.() } catch { /* best effort */ }
     await send(openRaw)
+    try { opts.onOpenSent?.() } catch { /* best effort */ }
     note('open is queued; once its round is ordered the feed publishes it: that is when mine (and a feed rival) sees Opened')
-    const fired = await Promise.allSettled([rival.requireSent(OPEN_TIMEOUT_MS), mine.requireSent(OPEN_TIMEOUT_MS)])
+    let fired: PromiseSettledResult<void>[]
+    if (opts.afterMineSent) {
+      // F5: mine first; the hook (a held simulator and its Enter prompts) runs before the rival's timeout starts.
+      const m = await Promise.allSettled([mine.requireSent(OPEN_TIMEOUT_MS)])
+      if (m[0]!.status === 'fulfilled') try { await opts.afterMineSent(mine.openBlock ?? rival.openBlock) } catch { /* best effort */ }
+      if (deferredBlock !== undefined) startProbe(deferredBlock)
+      const r = await Promise.allSettled([rival.requireSent(OPEN_TIMEOUT_MS)])
+      fired = [r[0]!, m[0]!]
+    } else fired = await Promise.allSettled([rival.requireSent(OPEN_TIMEOUT_MS), mine.requireSent(OPEN_TIMEOUT_MS)])
     const failed = fired.filter((f): f is PromiseRejectedResult => f.status === 'rejected')
     if (failed.length > 0) throw new Error(`a bot did not fire within ${OPEN_TIMEOUT_MS / 1000}s of open: ${failed.map((f) => (f.reason as Error).message).join('; ')}`)
+    try { await opts.beforeClaimsLine?.() } catch { /* best effort */ }
     step('both claims are sent; waiting for their receipts')
     const { landed, missing } = await collectLanded(env, [{ label: 'rival', hash: rival.hash! }, { label: 'mine', hash: mine.hash! }])
     const landedOf = (l: string) => landed.find((x) => x.label === l)
+    const rt = (t: number | undefined): number | undefined => (t === undefined || !opts.retime ? t : opts.retime(t))
     const result = async (b: BotIdentity, bot: RaceBot): Promise<BotResult> => ({
       name: b.name,
       address: b.account.address,
       via: bot.via,
-      seenAt: bot.seenAt,
-      sentAt: bot.sentAt,
+      seenAt: rt(bot.seenAt),
+      sentAt: rt(bot.sentAt),
       landed: landedOf(b.name) ? { block: landedOf(b.name)!.block, index: landedOf(b.name)!.index, tip: landedOf(b.name)!.tip, pgaRound: landedOf(b.name)!.pgaRound, ...(landedOf(b.name)!.roundUnknown ? { roundUnknown: true } : {}) } : undefined,
       rank: missing.includes(b.name) ? 0 : await readRank(reader, id, b.account.address),
     })
@@ -565,15 +597,15 @@ export async function runTrial(rc: RaceContext, sc: Scenario, opts: TrialOptions
       const order = [rival, mine].sort((a, b) => (a.sentAt ?? 0) - (b.sentAt ?? 0)).map((b) => (b === rival ? 'rival' : 'mine'))
       for (const l of claimRoundLines(rows, order)) internal(l)
     }
-    input.visibleAt = visibleBy(visible ? await visible : undefined, input.rival)
-    const t0 = Math.min(...[rival.seenAt, mine.seenAt].filter((x): x is number => x !== undefined))
+    input.visibleAt = rt(visibleBy(visible ? await visible : undefined, rival))
+    const t0 = rt(Math.min(...[rival.seenAt, mine.seenAt].filter((x): x is number => x !== undefined)))!
     const trial: Trial = {
       id,
       judgement: judgeRace(input),
       input,
       timeline: formatTimeline({ id, t0, openBlock, visibleAt: input.visibleAt, ordering: rc.ordering, mine: input.mine, rival: input.rival }),
     }
-    rc.trialMs = Math.max(rc.trialMs ?? 0, Date.now() - startedAt)
+    rc.trialMs = Math.max(rc.trialMs ?? 0, (opts.retime ? opts.retime(Date.now()) : Date.now()) - (opts.retime ? opts.retime(startedAt) : startedAt)) // paused (held) time is not trial time
     return trial
   } finally {
     await Promise.all([rival.close(), mine.close()])

@@ -44,6 +44,7 @@ test('demo --local --pause (stdin not a TTY): the whole story, exit 0, our tx fi
   const r = await runDemo(['--local', '--pause'], 300_000)
   assert.equal(r.code, 0, r.out)
   assert.doesNotMatch(r.out, /\x1b\[/, 'piped output has no ANSI escapes')
+  assert.doesNotMatch(r.out, /exaggerated pacing/, 'F6: piped output is not paced and carries no pacing NOTE')
 
   // --pause on a non-TTY stdin: the note, and the run did not wait for any Enter.
   assert.ok(r.out.includes(PAUSE_IGNORED), r.out)
@@ -63,6 +64,22 @@ test('demo --local --pause (stdin not a TTY): the whole story, exit 0, our tx fi
   assert.match(r.out, /==> ticket bought for our key hash 0x[0-9a-f]{64} in ticket round \d+/)
   const ch3 = r.out.slice(r.out.indexOf('▶ CHAPTER 3/6'), r.out.indexOf('▶ CHAPTER 4/6'))
   assert.doesNotMatch(ch3, /mined in block|==> tx 0x|no ticket yet/)
+  // F2: no skip message, a ticket card, at most 4 explanatory lines, no escape codes
+  assert.doesNotMatch(ch3, /skipping|skip/i, 'the clock skip is silent')
+  assert.doesNotMatch(ch3, /\x1b/, 'no escape codes when piped')
+  assert.match(ch3, /where a ticket is valid for 24h/)
+  assert.match(ch3, /WHAT IS IN THE TICKET +\| HOW IT IS USED/)
+  assert.match(ch3, /Tickets\.purchaseTickets\(/)
+  assert.doesNotMatch(r.out, /mint/i, 'the demo never mentions minting')
+  assert.doesNotMatch(r.out, /\bTEST\b/, 'the local token is USDGTest')
+  assert.match(ch3, /approve USDGTest, deposit, purchase/)
+  for (const n of ['USDGTest.approve(', 'Tickets.depositToken(', 'roundNumber()', 'currentPrice()', 'Authorization: Bearer <key>', 'keccak256']) assert.ok(ch3.includes(n), n)
+  assert.doesNotMatch(ch3.split('\n').filter((l) => /^[+|]/.test(l)).join('\n'), /active in/)
+  const card = ch3.split('\n').filter((l) => /^[+|]/.test(l))
+  assert.ok(card.length > 5 && card.every((l) => l.length <= 80), 'the card fits 80 columns')
+  const expl = ch3.split('\n').filter((l) => /^(NOTE:|==>)/.test(l) && !/Read more/.test(l))
+  assert.ok(expl.length <= 4, `chapter 3 has at most 4 explanatory lines:\n${expl.join('\n')}`)
+  assert.ok(!ch3.includes(marker), 'no raw key in chapter 3')
   assert.doesNotMatch(r.out, /key:new/)
   const ch1 = r.out.slice(r.out.indexOf('▶ CHAPTER 1/6'), r.out.indexOf('▶ CHAPTER 2/6'))
   assert.ok((ch1.match(/^NOTE:/gm) ?? []).length <= 5, 'chapter 1 has at most 5 NOTE lines:\n' + ch1)
@@ -137,28 +154,64 @@ test('demo --local --pause (stdin not a TTY): the whole story, exit 0, our tx fi
   assert.match(flat4, /In round 2 you competed blind: X was ranked by tip against /)
   assert.equal((r.out.match(/the background renewal landed|already renewed for the next ticket round/g) ?? []).length, 1, 'the renewal outcome is printed once')
 
-  // Chapter 5: the race, with the sequencer's internals, and mine at rank 1.
-  assert.match(r.out, /\[sequencer\] round \d+: waiting list/)
+  // Chapter 5 (F5): the race, mine at rank 1. The streamed [sequencer] narration is off; at most 3 summary NOTE lines replace it.
   assert.match(r.out, /^Scenario s3: PASS - mine ranks first: /m)
   assert.match(r.out, /^YOUR TX: ranks: mine rank 1 \(.*\); rival rank 2 \(/m)
   assert.match(r.out, /^Mine: rank 1\. Why: Fast Feed got us into block \d+ round 2 \(rival polled, arrived in block \d+ round \d\); our tip 0\.2 also beat the rival's 0\.1 \(we'd also win a same-round tie\)\.$/m)
   assert.ok(r.out.trimEnd().split('\n').at(-1)!.startsWith('Mine: rank 1. Why: '), 'the "Mine: ..." line is the last line')
 
-  // F1: the race's own block with and without Fast Feed (piped: stacked, left view first).
-  const ch5 = r.out.slice(r.out.indexOf('▶ CHAPTER 5/6'))
-  const iLeft = ch5.indexOf('WHAT I SEE WITH FAST FEED'), iRight = ch5.indexOf('WHAT OTHERS SEE WITHOUT FAST FEED')
-  assert.ok(iLeft > 0 && iRight > iLeft, 'both headings, left first:\n' + ch5)
-  const leftV = ch5.slice(iLeft, iRight), rightV = ch5.slice(iRight).split('YOUR TX:')[0]!
-  assert.match(leftV, /^round 1 — /m)
+  const ch5 = r.out.slice(r.out.indexOf('▶ CHAPTER 5/6'), r.out.indexOf('▶ CHAPTER 6/6'))
+  assert.doesNotMatch(ch5, /\[sequencer\]/, 'no streamed sequencer narration in chapter 5')
+  const summary = ch5.split('\n').filter((l) => /^NOTE: (round \d+ of block|round \d+: mine|rival \(polling\)|the rival landed)/.test(l))
+  assert.ok(summary.length >= 2 && summary.length <= 3, `at most 3 sequencer summary lines:\n${summary.join('\n')}`)
+  assert.ok(summary.every((l) => l.length <= 80 && (l.match(/NOTE:/g) ?? []).length === 1))
+  assert.match(summary.join('\n'), /^NOTE: round 2: mine \(0\.2 gwei\) first, then \d+ txs? at lower tips /m)
+  assert.ok(!/[\u001b]/.test(ch5))
+
+  // The three stages, in order: round 1 only (left), then round 2 on the left and the whole block N on the right, then block M (right only).
+  const iS1 = ch5.indexOf('WHAT I SEE WITH FAST FEED')
+  const iS2 = ch5.indexOf('NOTE: round 1 again')
+  const iRight = ch5.indexOf('WHAT OTHERS SEE WITHOUT FAST FEED')
+  assert.ok(iS1 > 0 && iS2 > iS1 && iRight > iS2, 'stage 1, then stage 2 (left, then right):\n' + ch5)
+  const stage1 = ch5.slice(iS1, iS2)
+  const raceBlock = stage1.match(/^block (\d+) — /m)![1]!
+  assert.match(stage1, /^round 1 — /m)
+  assert.doesNotMatch(stage1, /^round 2 — /m, 'stage 1 shows round 1 only')
+  assert.doesNotMatch(stage1, /<- yours|WHAT OTHERS|\+60ms/, 'stage 1 has no right side and mine is not there yet')
+  assert.match(stage1, /latency \(vs no FF\)/)
+  const iM = ch5.search(new RegExp(`^block (?!${raceBlock} )\\d+ — `, 'm'))
+  const stage2 = ch5.slice(iS2, iM > 0 ? iM : undefined)
+  const leftV = stage2.slice(0, stage2.indexOf('WHAT OTHERS SEE WITHOUT FAST FEED'))
+  const rightAll = stage2.slice(stage2.indexOf('WHAT OTHERS SEE WITHOUT FAST FEED'))
+  const rightV = rightAll.slice(0, rightAll.search(/^==> |^NOTE: /m) > 0 ? rightAll.search(/^==> |^NOTE: /m) : undefined) // the table only
   assert.match(leftV, /^round 2 — /m)
-  assert.match(leftV, /-\d+\.\d\ds/)
-  assert.doesNotMatch(leftV, /\+\d+\.\d\ds/)
-  const raceBlock = leftV.match(/^block (\d+) — /m)![1]
+  assert.match(leftV, /-\d+\.\d\ds \(-\d+ ms\)/)
+  assert.doesNotMatch(leftV, /\+\d+ms|pending/)
+  assert.match(leftV, /<- yours/)
   assert.match(rightV, new RegExp(`^block ${raceBlock} — `, 'm'))
-  const leftTxs = [...leftV.matchAll(/ · (\d+) txs?$/gm)].reduce((n, m) => n + Number(m[1]), 0)
-  const rightTxs = rightV.split('\n').slice(1).filter((l) => /^ {3}\d+ {2}/.test(l)).length
-  assert.ok(leftTxs >= 2 && rightTxs === leftTxs, `right view lists ${rightTxs} txs, left rounds sum to ${leftTxs}`)
-  assert.doesNotMatch(rightV, /vs no FF|round \d/)
+  assert.match(rightV, /idx +from +tip +latency/)
+  assert.doesNotMatch(rightV, /vs no FF|round \d|-\d+\.\d\ds/)
+  const dataRows = (v: string) => v.split('\n').filter((l) => /^ {3}\d+ {2}/.test(l))
+  const txCount = (v: string) => [...v.matchAll(/ · (\d+) txs?$/gm)].reduce((n, m) => n + Number(m[1]), 0)
+  const rightN = dataRows(rightV)
+  assert.equal(rightN.length, txCount(stage1) + txCount(leftV.slice(leftV.indexOf('round 2 — '))), 'the right shows the WHOLE block N')
+  for (const l of rightN) assert.match(l, /\+60ms/)
+  // Extras after mine in block N: higher tx_index, lower tip.
+  const parse = (l: string) => ({ idx: Number(l.trim().split(/\s+/)[0]), tip: Number(l.match(/([\d.]+) gwei/)![1]) })
+  const iMine = rightN.findIndex((l) => l.includes('<- yours'))
+  assert.ok(iMine >= 0 && iMine < rightN.length - 1, 'at least one row after mine in block N:\n' + rightV)
+  for (const l of rightN.slice(iMine + 1)) {
+    assert.ok(parse(l).idx > parse(rightN[iMine]!).idx && parse(l).tip < parse(rightN[iMine]!).tip, `extra after mine: ${l}`)
+  }
+  assert.match(leftV, /<- yours/)
+  // Stage 3: block M only under block N, on the right, with the rival; never on the left.
+  assert.ok(iM > iRight, 'block M comes after block N on the right')
+  const stage3 = ch5.slice(iM)
+  assert.match(stage3.split('\n').slice(0, 8).join('\n'), /<- rival/)
+  assert.ok(!stage1.includes(`block ${stage3.match(/^block (\d+)/)![1]} `) && !leftV.includes(`block ${stage3.match(/^block (\d+)/)![1]} `), 'block M is not on the left')
+  assert.ok(ch5.indexOf('Scenario s3: PASS') < iM, 'stage 3 comes after the race report')
+  for (const l of ch5.split('\n').filter((x) => /^ {3}\d+ {2}|^block |^round /.test(x))) assert.ok(l.length <= 80, `within 80 columns: ${l}`)
+  assert.ok(ch5.indexOf('YOUR TX:') > iM)
 
   // The raw feed key is generated in memory and never printed: only 0x-prefixed hashes appear (a raw key is 64 hex with no 0x).
   const bare = r.out.match(/(?<![0-9a-zA-Fx])[0-9a-f]{64}(?![0-9a-fA-F])/g)

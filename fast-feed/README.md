@@ -63,7 +63,7 @@ Add `--reconnect` to the feed command to survive refusals and rollovers ([`--rec
 
 ## Tickets and keys
 
-- A **ticket** is bought from the `Tickets` contract with a payment token (USDG on Arbitrum One, TEST on Sepolia and locally). One ticket allows one feed connection (see [One connection per ticket](#one-connection-per-ticket)). The price moves between rounds with demand; within a round it is fixed.
+- A **ticket** is bought from the `Tickets` contract with a payment token (USDG on Arbitrum One, the Offchain Labs test token on Sepolia, the local USDGTest locally). One ticket allows one feed connection (see [One connection per ticket](#one-connection-per-ticket)). The price moves between rounds with demand; within a round it is fixed.
 - An **API key** is a random secret you generate. You never send it on chain; you send its **keccak256 hash** (`apiKeyHash`) with the purchase. The feed receives the raw key as `Authorization: Bearer <key>`, hashes it, and looks for a ticket purchased for that hash. This repo hashes the key's UTF-8 bytes (`fast-feed/client/key.ts`); `cast keccak <key>` gives the same value for a key without a `0x` prefix, and `npm run key:new` generates such keys.
 - Tickets are sold per **round**. The contract's `roundNumber()` and `currentPrice()` change with time; a purchase must name the round and price you read, so a rollover between read and purchase fails instead of silently charging the new price.
 
@@ -71,12 +71,12 @@ Add `--reconnect` to the feed command to survive refusals and rollovers ([`--rec
 
 `npm run tickets:buy -- --local --tickets 1` narrates each one:
 
-1. **mint** (local only): the local TEST token has a public `mint`.
+1. **mint** (local only): the local USDGTest token has a public `mint`.
 2. **approve** the Tickets contract: it pulls tokens with `transferFrom`.
 3. **`depositToken(amount)`**: tokens move into the contract's internal balance.
 4. **read** `roundNumber()` and `currentPrice()` (plus `roundEnd()`, `grandfatherPeriodEnd()` and your `grandfatherCount`).
 5. **`purchaseTickets(round, price, n, keccak256(key))`**: debits `price * n` from the deposited balance and records the hash.
-6. **status / withdraw**: `npm run tickets:status` shows balances, round, price, your tickets and the key's active tickets in the current round and when they expire. `npm run tickets:withdraw` takes back the unused deposit (all of it, or `--amount <TEST>`).
+6. **status / withdraw**: `npm run tickets:status` shows balances, round, price, your tickets and the key's active tickets in the current round and when they expire. `npm run tickets:withdraw` takes back the unused deposit (all of it, or `--amount <tokens>`, in whole tokens).
 
 If the round or price moved, you get a readable message such as `Round changed (expected 3, now 4): ... rerun the command.` Rerun it.
 
@@ -120,7 +120,7 @@ On a close the CLI prints one line, for example `closed 1008 (ticket expired). R
 Typical renewal loop: your ticket expires (`1008`), you run `npm run tickets:buy`, and the reconnecting feed gets `401` until the new ticket activates at the end of the round, then prints `connected`.
 
 > **`--local` vs `--testnet`**
-> - Mint is local-only. On Arbitrum Sepolia you get TEST from Offchain Labs via Discord; if your wallet is short of TEST, `tickets:buy --testnet` prints that minting is not possible there (and the deposit then fails with a readable error).
+> - Mint is local-only. On Arbitrum Sepolia you get the test token from Offchain Labs via Discord; if your wallet is short of it, `tickets:buy --testnet` prints that minting is not possible there (and the deposit then fails with a readable error).
 > - `--local` needs a running simulator (`npm run sim`) because tickets live in its chain. `--testnet` needs `PRIVATE_KEY` for a funded throwaway wallet.
 > - The local ticket round is 30s (Arbitrum One: 24 hours), so a ticket expires within about a minute (the round it is bought in plus one) and you can watch `1008` happen. With slow blocks it is raised automatically, and `TICKET_ROUND_SECONDS` overrides it; the rule and its `NOTE:` lines are in [sim/README.md](../sim/README.md#ticket-round-adaptive).
 > - The mock simulates `401`, `429`, `426`, `1008`, `1003` and `1011`. It counts open connections per key hash when the upgrade arrives (one per active ticket).
@@ -256,10 +256,10 @@ When the ticket round ends without a renewal, the connection closes and the view
 | Round duration | 24 hours | 10 minutes (docs) | 30 seconds (adaptive, [sim/README.md](../sim/README.md#ticket-round-adaptive)) |
 | Target tickets / round | 100 | read on chain (`tickets:status`) | 100 |
 | Max tickets / round | 200 | read on chain | 200 |
-| Minimum price / round | $17 (17000000, 6 decimals) | read on chain | 1 TEST |
+| Minimum price / round | $17 (17000000, 6 decimals) | read on chain | 1 USDGTest |
 | Price update fraction | 144 | read on chain | 144 |
 | Grandfather period | ~0.5 (128/256) | read on chain | 0 (none) |
-| Payment token | USDG | TEST (`0xca20…1e00`, minted by Offchain Labs) | TEST (local 6-decimals ERC20, auto-minted) |
+| Payment token | USDG | test token (`0xca20…1e00`, minted by Offchain Labs) | USDGTest (local 6-decimals ERC20, auto-minted) |
 | Block time B / rounds per block K | 250ms / 2 | read empirically (later) | 2000ms / 2 (slow preset; `--preset fast` uses 250ms / 2) |
 
 `npm run sim` prints the local values next to the Arbitrum One ones. The local Tickets contract is the unmodified reference contract (`contracts/src/fast-feed/vendor/`), deployed behind a proxy at stack start; Anvil dev account 9 owns it. The banner prints the local round in use.
@@ -278,7 +278,7 @@ The local chain mines a block only when a transaction arrives, so its latest blo
 | `npm run key:new [-- --force]` | Generates a random feed key into `.env` (`FEED_API_KEY`) and prints only its keccak256 hash. Replacing an existing key needs `--force`. |
 | `npm run tickets:buy -- --local\|--testnet [--tickets N]` | Narrated purchase: mint (local only), approve, `depositToken`, read round and price, `purchaseTickets`, then when access starts. Needs a running simulator for `--local`. |
 | `npm run tickets:status -- --local\|--testnet` | Wallet and deposited balance, round, price, round end, grandfather end, tickets held, `grandfatherCount`, and the key's active tickets this round and when they expire. |
-| `npm run tickets:withdraw -- --local\|--testnet [--amount TEST]` | Withdraws your whole deposit, or `--amount` (in TEST). |
+| `npm run tickets:withdraw -- --local\|--testnet [--amount <tokens>]` | Withdraws your whole deposit, or `--amount` (in whole tokens: USDGTest locally, the network's test token on Sepolia). |
 | `npm run feed -- --local\|--testnet [--raw] [--reconnect]` | Connects with `FEED_API_KEY` and prints each message decoded, plus how long after it the block became visible. A refusal or close prints the code, its cause and fix ([table](#errors-the-single-table)) and exits non-zero. `--reconnect`: [retry rules](#--reconnect). With `--local` it starts the stack, or attaches if one already runs. |
 | `npm run feed -- --local\|--testnet --live` | The [live view](#live-view): a header, one table per round, a timing line and FF lead lines; yours highlighted `>>` (`MY_ADDRESSES` adds more). |
 | `npm run traffic -- --local [--tps N]` | Background load for the live view (needs `npm run sim`): Anvil dev accounts 10-19, one tx in flight per wallet, tips uniform in 0 to 0.1 gwei, default 5 tx/s. Prints the achieved rate every 5s. `--testnet` is refused (it would spam a shared network). |

@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream'
 import { parseGwei, type Address } from 'viem'
 import { ConfigError } from '../../shared/config.ts'
 import {
-  CHAPTERS, PanelRenderer, chapterHeader, chapterNeedMs, clock, pauseTicketOutcome, demoExitCode, demoLiveOptions, FIFO_FAILURE, formatPauseTicketLine, rebuyReason, pauseBefore, PAUSE_IGNORED, parseDemoArgs, pgaRecapLine, postPauseTicketAction, takeawayLine, TESTNET_REFUSAL, USAGE, waitEnter, waitEnterKey, chapterDelayMs, demoCloseLines, enterDecision, promptPanelLines, keyLines, ticketSummaryLines, ticketRoundNoteLine, activationWaitLine, estimateActivationMs, pausedOverlapMs, retimeForPause, retimeThrough, SimHold, roundLeft, ticketNeedsRefresh, composeStoryPanel, armHoldAndWait, ACTIVATION_SKIP_OVER_MS, originAfterPauses, shouldFreezeAtPrompt, runPromptHold, type SimClockInfo,
+  CHAPTERS, PanelRenderer, chapterHeader, chapterNeedMs, clock, pauseTicketOutcome, demoExitCode, demoLiveOptions, FIFO_FAILURE, formatPauseTicketLine, rebuyReason, pauseBefore, PAUSE_IGNORED, parseDemoArgs, pgaRecapLine, postPauseTicketAction, takeawayLine, TESTNET_REFUSAL, USAGE, waitEnter, waitEnterKey, chapterDelayMs, demoCloseLines, enterDecision, promptPanelLines, keyLines, ticketSummaryLines, ticketRoundNoteLine, activationWaitLine, formatTicketCard, purchaseLandWaitMs, PURCHASE_BLOCKS, pausedOverlapMs, retimeForPause, retimeThrough, SimHold, roundLeft, ticketNeedsRefresh, composeStoryPanel, genericFrameBlocks, armHoldAndWait, ACTIVATION_SKIP_OVER_MS, shouldSkipActivation, silentSkip, originAfterPauses, shouldFreezeAtPrompt, runPromptHold, type SimClockInfo,
 } from '../demo.ts'
 import { canSendInRound2, indexWithinRound, judgeRound2Injection, round2Plan } from '../demo.ts'
 import { judgeRace, whyLine, type BotResult, type RaceInput } from '../scenarios.ts'
@@ -38,7 +38,7 @@ test('the entry point: no network flag is usage (exit 2); --testnet is refused (
   const testnet = run(['--testnet'])
   assert.equal(testnet.status, 1)
   assert.ok(testnet.stderr.includes(TESTNET_REFUSAL), testnet.stderr)
-  assert.match(testnet.stderr, /the testnet demo is the testnet stage \(C4\): needs funded wallets, TEST tickets and `race:deploy -- --testnet`/)
+  assert.match(testnet.stderr, /the testnet demo is the testnet stage \(C4\): needs funded wallets, tickets and `race:deploy -- --testnet`/)
   assert.equal(testnet.stdout, '', 'nothing was run')
   assert.match(USAGE, /--pause/)
 })
@@ -391,17 +391,19 @@ test('E1: chapter 2 has no key:new note and never shows the raw key; chapter 3 s
   assert.ok(key.includes(hash))
   const sum = ticketSummaryLines({ keyHash: hash, round: 3, renewed: true, activeFrom: 1_000_000, activeUntil: 1_030_000 })
   const text = sum.join('\n')
-  assert.doesNotMatch(text, /mined in block|==> tx 0x|approve the Tickets|mint 12/)
+  assert.doesNotMatch(text, /mined in block|==> tx 0x|approve the Tickets|mint 12|mint/i)
+  assert.match(text, /approve USDGTest, deposit, purchase/)
   assert.ok(sum.length <= 2 && sum[0]!.startsWith('==> ticket bought for our key hash ' + hash + ' in ticket round 3'))
   assert.match(ticketSummaryLines({ keyHash: hash, round: 3, renewed: false, activeFrom: 1, activeUntil: 2 })[1]!, /renewal did not land/)
 })
 
-test('E1: chapter 3 explains the ticket round against 24h and prints a waiting line only above 20 s', () => {
+test('E1/F2: chapter 3 explains the ticket round against 24h and prints a waiting line only above 20 s', () => {
   const n = ticketRoundNoteLine(30)
-  assert.match(n, /^NOTE: LOCAL: a ticket round is 30s here instead of 24h on Arbitrum One/)
+  assert.match(n, /^NOTE: LOCAL: a ticket round is 30s here instead of 24h on Arbitrum One, where a ticket is valid for 24h/)
+  assert.equal(n.match(/NOTE:/g)!.length, 1)
   assert.equal(activationWaitLine(20_000), undefined)
   assert.equal(activationWaitLine(5_000), undefined)
-  assert.equal(activationWaitLine(20_001), '==> waiting ~21s for the ticket to activate')
+  assert.equal(activationWaitLine(20_001), '==> waiting for the ticket purchase to land (up to ~21s)')
 })
 
 test('E1 review: the ticket-round NOTE is relative to 24h and never calls a long wait short', () => {
@@ -411,15 +413,47 @@ test('E1 review: the ticket-round NOTE is relative to 24h and never calls a long
   }
 })
 
-test('E1 review: waiting estimate lands in the next round when too little of this one is left; upper-bound wording before the purchase lands', () => {
-  const round = 100_000
-  const block = 25_000
-  // 90 s left, buying starts after 3 blocks (75 s), 15 s left < minRoundLeftS: the purchase lands in the NEXT round.
-  assert.equal(estimateActivationMs(190_000, 100_000, round, block), 290_000)
-  // plenty left: this round's end
-  assert.equal(estimateActivationMs(300_000, 100_000, round, 2000), 300_000)
-  assert.equal(activationWaitLine(60_000, true), '==> waiting for the ticket purchase to land and activate (up to ~60s)')
-  assert.equal(activationWaitLine(10_000, true), undefined)
+test('F2: the purchase landing estimate is PURCHASE_BLOCKS blocks after the start and never negative', () => {
+  assert.equal(PURCHASE_BLOCKS, 4)
+  assert.equal(purchaseLandWaitMs(1_000, 1_000, 25_000), 100_000)
+  assert.equal(purchaseLandWaitMs(1_000, 61_000, 25_000), 40_000)
+  assert.equal(purchaseLandWaitMs(1_000, 500_000, 25_000), 0)
+})
+
+test('F2: the chapter-3 text is at most 4 explanatory lines (note, wait, bought, activation)', () => {
+  const sum = ticketSummaryLines({ keyHash: '0x' + 'ab'.repeat(32), round: 1, renewed: 'pending', activeFrom: 1, activeUntil: 2 })
+  const all = [ticketRoundNoteLine(100), activationWaitLine(60_000)!, ...sum]
+  assert.ok(all.length <= 4)
+  for (const l of all) assert.ok(l.startsWith('NOTE:') || l.startsWith('==>'))
+  assert.equal(all.filter((l) => l.startsWith('NOTE:')).every((l) => l.indexOf('NOTE:', 1) === -1), true)
+})
+
+test('F2 formatTicketCard: boxed, at most 80 columns, real function name, short hash, no raw key, times and 24h', () => {
+  const hash = '0x' + 'ab'.repeat(32)
+  for (const secs of [20, 30, 100]) {
+    const card = formatTicketCard({ round: 7, owner: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266', keyHash: hash, numTickets: 1, activeFrom: Date.UTC(2026, 0, 1, 11, 50, 26), activeUntil: Date.UTC(2026, 0, 1, 11, 52, 6), roundSeconds: secs })
+    const text = card.join('\n')
+    for (const l of card) assert.ok(l.length <= 80, `${l.length}: ${l}`)
+    assert.equal(new Set(card.map((l) => l.length)).size, 1, 'a rectangle')
+    assert.match(text, /Tickets\.purchaseTickets\(/)
+    // the five steps, in order, with the real names
+    const at = ['USDGTest.approve(', 'Tickets.depositToken(', 'roundNumber()', 'currentPrice()', 'Tickets.purchaseTickets(', 'Authorization: Bearer <key>', 'keccak256'].map((n) => text.indexOf(n))
+    assert.ok(at.every((x) => x >= 0) && at.every((x, k) => k === 0 || x > at[k - 1]!), `steps in order: ${at}`)
+    for (const n of ['1.', '2.', '3.', '4.', '5.']) assert.ok(text.includes(`| ${n} `), n)
+    assert.doesNotMatch(text, /mint/i)
+    assert.doesNotMatch(text, /active in/)
+    assert.doesNotMatch(text, /\bTEST\b/)
+    assert.match(text, /expectedRound=7,/)
+    assert.match(text, /numTicketsDesired=1,/)
+    assert.match(text, /apiKeyHash=0xabababab…ababab\)/)
+    assert.ok(text.includes('bought in    : round 7') && text.includes('11:50:26Z') && text.includes('11:52:06Z'))
+    assert.ok(text.includes('24h on Arbitrum One') && text.includes(`${secs}s`))
+    assert.ok(text.includes('0xabababab…ababab') && !text.includes(hash))
+    assert.match(text, /Authorization: Bearer <key>/)
+    assert.match(text, /keccak256/)
+    assert.match(text, /TicketsPurchased/)
+    assert.doesNotMatch(text, /\x1b/)
+  }
 })
 
 test('E1 review: the failure after 4 attempts names the last rejection and keeps it as cause', async () => {
@@ -508,8 +542,30 @@ test('E2 ticketNeedsRefresh: chapters 4-5 refresh when the ticket is about to ru
   assert.equal(ticketNeedsRefresh({ session: undefined, nowMs: 5_000, roundMs, blockMs, chapter: 5 }), true)
 })
 
-test('E2: chapter 3 skips the clock only above 20 s of activation wait', () => {
-  assert.equal(ACTIVATION_SKIP_OVER_MS, 20_000)
+test('F2 shouldSkipActivation: only on an owned stack and only when more than 1 s of activation wait remain', () => {
+  assert.equal(ACTIVATION_SKIP_OVER_MS, 1_000)
+  const now = 1_000_000
+  assert.equal(shouldSkipActivation({ attached: true, activeFromMs: now + 60_000, chainNowMs: now }), false, 'attached: never')
+  assert.equal(shouldSkipActivation({ attached: false, activeFromMs: now + 1_001, chainNowMs: now }), true)
+  assert.equal(shouldSkipActivation({ attached: false, activeFromMs: now + 60_000, chainNowMs: now }), true)
+  assert.equal(shouldSkipActivation({ attached: false, activeFromMs: now + 1_000, chainNowMs: now }), false)
+  assert.equal(shouldSkipActivation({ attached: false, activeFromMs: now - 5, chainNowMs: now }), false)
+})
+
+test('F2 silentSkip: success is silent; a failing skip still resolves and the error is recorded', async () => {
+  const seen: Error[] = []
+  await silentSkip(async () => {}, (e) => seen.push(e))
+  assert.equal(seen.length, 0)
+  await silentSkip(async () => { throw new Error('the skip stayed pending') }, (e) => seen.push(e))
+  assert.equal(seen.length, 1)
+  assert.match(seen[0]!.message, /stayed pending/)
+  await silentSkip(() => Promise.reject('plain'), (e) => seen.push(e))
+  assert.equal(seen[1]!.message, 'plain')
+})
+
+test('F2 activationWaitLine: the activation wait wording above 20 s', () => {
+  assert.equal(activationWaitLine(20_001, 'activation'), '==> waiting ~21s for the ticket to activate')
+  assert.equal(activationWaitLine(20_000, 'activation'), undefined)
 })
 
 test('E2 originAfterPauses: a pause that ended before the measurement leaves the origin alone; one after it moves the origin with the retimed rows', () => {
@@ -759,4 +815,50 @@ test('E3 story panel on a short terminal (14 rows): the prompt is kept while hel
   assert.ok(held[0]!.startsWith('block 11 —'))
   const done = draw(composeParts({ sealed: 'SEALED' }), rows)
   assert.equal(done.at(-1), 'SEALED', 'the sealed line survives the cut')
+})
+
+test('F6 composeStoryPanel: reveal limits the rows drawn per round (headers stay), absent = all; the column header and the layout do not change', () => {
+  const body = [
+    'block 11 [open]: ...',
+    '   index  from         effective tip     FF lead',
+    '  round 1/2 · 3 txs',
+    '       0  0xaaaa…aaaa  0.09 gwei  -',
+    '       1  0xbbbb…bbbb  0.05 gwei  -',
+    '       2  0xcccc…cccc  0.01 gwei  -',
+    '  round 2/2 · 2 txs',
+    '       3  0xdddd…dddd  1 gwei     -',
+    '       4  0xeeee…eeee  0.05 gwei  -',
+  ]
+  const rows = (reveal?: Record<number, number | undefined>) => compose({ reveal, slowed: [] }, body).filter((l) => /^ {7}\d /.test(l))
+  assert.equal(rows(undefined).length, 5)
+  assert.equal(rows({ 1: 2, 2: 0 }).length, 2, 'two of round 1, none of round 2')
+  assert.equal(rows({ 1: undefined, 2: 1 }).length, 4)
+  const headers = (r?: Record<number, number | undefined>) => compose({ reveal: r, slowed: [] }, body).filter((l) => /^round \d — |index {2}from/.test(l))
+  assert.deepEqual(headers({ 1: 0, 2: 0 }), headers(undefined), 'headers are drawn with no rows revealed')
+})
+
+test('F6 panel: no frame draws more round-1 rows than the revealed count (reveal[1] = 0 from the moment the hold took effect)', () => {
+  const body = [
+    'block 11 [open]: ...',
+    '   index  from         effective tip     FF lead',
+    '  round 1/2 · 6 txs',
+    ...[0, 1, 2, 3, 4, 5].map((i) => `       ${i}  0xaaaa…aaa${i}  0.0${i} gwei  -`),
+    '  round 2/2: not ordered yet',
+  ]
+  const r1 = (reveal: Record<number, number | undefined>) => compose({ reveal, slowed: [] }, body).filter((l) => /^ {7}\d /.test(l)).length
+  for (const shown of [0, 1, 3, 4, 6]) assert.equal(r1({ 1: shown }), shown, `revealed ${shown}`)
+  assert.equal(r1({ 1: undefined }), 6, 'after the reveal everything is drawn')
+})
+
+test('F6 generic frame: while a hold is armed and its block unknown, the open block is hidden; otherwise unchanged', () => {
+  assert.deepEqual(genericFrameBlocks('open', 'prev', true), { open: 'prev', previous: undefined })
+  assert.deepEqual(genericFrameBlocks('open', undefined, true), { open: undefined, previous: undefined })
+  assert.deepEqual(genericFrameBlocks('open', 'prev', false), { open: 'open', previous: 'prev' })
+})
+
+test('F6 armHoldAndWait tells onHeld which block the hold took effect on', async () => {
+  const seen: (number | undefined)[] = []
+  const rpc = async <T,>(m: string): Promise<T> => (m === 'sim_clock' ? ({ paused: true, heldAt: { block: 7, round: 2 }, chainNowMs: 1 } as unknown as T) : ({ paused: false, armed: true } as unknown as T))
+  await armHoldAndWait({ rpc, holder: 'h', timeoutMs: 1000, pollMs: 1, onArmed: () => {}, onHeld: (_h, _c, b) => void seen.push(b), onTimeout: async () => {} })
+  assert.deepEqual(seen, [7])
 })

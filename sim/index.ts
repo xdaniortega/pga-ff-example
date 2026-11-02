@@ -21,7 +21,7 @@ export interface Stack {
   attached: boolean
   /** Parameters of the RUNNING stack (for an attach, its own, which may differ from ours). */
   params: LocalParams
-  /** The deployed TEST / Tickets proxy / admin addresses. */
+  /** The deployed USDGTest / Tickets proxy / admin addresses. */
   contracts: LocalContracts
   stop(): Promise<void>
 }
@@ -99,10 +99,10 @@ export async function startOrAttach(p: LocalParams, chainId: number, opts: Start
   const closers: (() => Promise<void>)[] = [() => anvil.stop()]
   let contracts: LocalContracts
   try {
-    say('deploying TEST + Tickets (behind a proxy, accelerated ticket parameters) + the Race contract')
+    say('deploying USDGTest + Tickets (behind a proxy, accelerated ticket parameters) + the Race contract')
     const dep = await deployTickets(anvil, p, chainId)
     contracts = { tickets: dep.tickets, testToken: dep.testToken, admin: dep.admin, race: dep.race, deployBlock: dep.deployBlock }
-    say(`TEST ${dep.testToken}, Tickets proxy ${dep.tickets} (admin/beneficiary: Anvil account 9 ${dep.admin})`)
+    say(`USDGTest ${dep.testToken}, Tickets proxy ${dep.tickets} (admin/beneficiary: Anvil account 9 ${dep.admin})`)
     say(`Race ${dep.race} (operator: Anvil account 9), used by \`npm run race\``)
     await fundUserWallets(anvil, opts.env ?? process.env)
     // Feed auth is built before the first-round wait; it reads the chain at request time.
