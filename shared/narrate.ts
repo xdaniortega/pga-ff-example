@@ -3,7 +3,8 @@
 //   kind        style                 printer
 //   internal    magenta               internal()   sequencer internals; shown only in --local (a real sequencer is a black box)
 //   step        cyan                  step()       "==> an action happening now"
-//   important   bold + inverse        important()  chapter headers, the user's own tx, key moments
+//   important   bold + inverse        important()  chapter / section headlines (full-width grey bar on a TTY)
+//   yours       bold + inverse cyan   yours()      "YOUR TX:" / lesson / Mine: callouts (same bar, cyan highlight)
 //   note        yellow                note()       "NOTE: ..." an explanation that is not an action
 //   warn        bold yellow           warn()       "WARNING: ..." a request that will not be honoured (stdout)
 //   result      bold green / red / yellow result()     PASS / FAIL / INCONCLUSIVE
@@ -12,13 +13,14 @@
 //
 // Colour is on only when it helps: see `colorEnabled`. Logs, pipes and tests stay plain text.
 
-export type Kind = 'internal' | 'step' | 'important' | 'note' | 'warn' | 'pass' | 'fail' | 'inconclusive' | 'error' | 'bold'
+export type Kind = 'internal' | 'step' | 'important' | 'yours' | 'note' | 'warn' | 'pass' | 'fail' | 'inconclusive' | 'error' | 'bold'
 
 /** The exact ANSI start sequence per kind (every styled string ends with RESET). */
 export const PALETTE: Readonly<Record<Kind, string>> = {
   internal: '\x1b[35m', // magenta
   step: '\x1b[36m', // cyan
   important: '\x1b[1;7m', // bold + inverse
+  yours: '\x1b[1;7;36m', // bold + inverse + cyan — same bar as important, cyan tint for "your" callouts
   note: '\x1b[33m', // yellow
   warn: '\x1b[1;33m', // bold yellow
   pass: '\x1b[1;32m', // bold green
@@ -72,7 +74,7 @@ export function noteText(msg: string): string {
 
 /** An explanation that is not an action. Prints "NOTE: msg" (the prefix is added once, also without colour). */
 export function note(msg: string): void {
-  console.log(color('note', noteText(msg)))
+  console.log(noteColor(noteText(msg)))
 }
 
 /** Pure: a warning line. Always starts with "WARNING:", never doubled. */
@@ -85,14 +87,40 @@ export function warn(msg: string): void {
   console.log(color('warn', warnText(msg)))
 }
 
-/** Pre-formed NOTE lines (the first starts with `NOTE:`, the continuation lines are indented): printed in the note colour, one line each. */
-export function noteLines(lines: readonly string[]): void {
-  for (const l of lines) console.log(color('note', l))
+/** True when `line` starts with the one-line prefix (never doubled by the printers above). */
+const splitPrefix = (line: string, prefix: string): string | undefined => (line.startsWith(prefix) ? line.slice(prefix.length) : undefined)
+
+/** Colour of one NOTE line: a bold `NOTE:` prefix over the yellow body, so the marker stands out on a terminal (plain text unchanged). */
+function noteColor(line: string): string {
+  const enabled = colorEnabled(process.stdout.isTTY)
+  const rest = enabled ? splitPrefix(line, 'NOTE:') : undefined
+  if (rest === undefined) return color('note', line, enabled)
+  return `${PALETTE.note}${PALETTE.bold}NOTE:${RESET}${PALETTE.note}${rest}${RESET}`
 }
 
-/** An important step: bold and highlighted. */
+/** Pre-formed NOTE lines (the first starts with `NOTE:`, the continuation lines are indented): printed in the note colour, one line each. */
+export function noteLines(lines: readonly string[]): void {
+  for (const l of lines) console.log(noteColor(l))
+}
+
+/** Fallback bar width when the stream has no `columns` (e.g. FORCE_COLOR on a pipe); a real TTY uses the terminal width. */
+export const IMPORTANT_BAR_COLS = 80
+
+/** Pure: pad `msg` to a full-width bar when colour is on (terminal columns, else `IMPORTANT_BAR_COLS`); piped/plain output keeps every byte. */
+export function importantBar(msg: string, enabled: boolean = colorEnabled(process.stdout.isTTY), columns: number | undefined = process.stdout.columns): string {
+  if (!enabled) return msg
+  const w = columns !== undefined && columns > 0 ? columns : IMPORTANT_BAR_COLS
+  return msg.length >= w ? msg : msg.padEnd(w)
+}
+
+/** A section headline: bold + inverse, padded to the full terminal width on a TTY. */
 export function important(msg: string): void {
-  console.log(color('important', msg))
+  console.log(color('important', importantBar(msg)))
+}
+
+/** A "your result" callout (YOUR TX / lesson / Mine:): inverse cyan highlight over the text only (not a full-width bar). */
+export function yours(msg: string): void {
+  console.log(color('yours', msg))
 }
 
 /** Sequencer internals: magenta, and only visible in --local. */

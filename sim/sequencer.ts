@@ -204,8 +204,18 @@ const short = (h: string) => `${h.slice(0, 10)}..`
 /** Narration lines for a non-empty round: the waiting list, held txs, the drained order, and any nonce-rule note. */
 export function formatRound(r: RoundInfo, ordering: 'pga' | 'fifo'): string[] {
   if (!r.queue || !r.drained) return []
+  // Column widths shared by the queue and the drained rows, so tips and bids line up down the log.
+  const widths = (txs: readonly RoundTx[]) => {
+    const w = (f: (t: RoundTx) => string) => Math.max(0, ...txs.map((t) => f(t).length))
+    return { bid: w((t) => `${gwei(t.maxPriorityFeePerGas)}/${gwei(t.maxFeePerGas)} gwei`), tip: w((t) => `${gwei(t.effectiveTip)} gwei`) }
+  }
+  const qw = widths(r.queue)
+  const dw = widths(r.drained)
+  const bid = (t: RoundTx) => `${gwei(t.maxPriorityFeePerGas)}/${gwei(t.maxFeePerGas)} gwei`.padStart(qw.bid)
+  const queueTip = (t: RoundTx) => `${gwei(t.effectiveTip)} gwei`.padStart(qw.tip)
+  const drainedTip = (t: RoundTx) => `${gwei(t.effectiveTip)} gwei`.padStart(dw.tip)
   const row = (t: RoundTx) =>
-    `${short(t.hash)} from ${short(t.from)} nonce ${t.nonce} bid ${gwei(t.maxPriorityFeePerGas)}/${gwei(t.maxFeePerGas)} gwei  effective tip ${gwei(t.effectiveTip)} gwei  arrival #${t.arrival} (+${t.arrivalOffsetMs}ms into its round)${t.boost > 0n ? `  boost +${gwei(t.boost)} -> queue priority ${gwei(t.priority)} gwei` : ''}`
+    `${short(t.hash)} from ${short(t.from)} nonce ${t.nonce} bid ${bid(t)}  effective tip ${queueTip(t)}  arrival #${t.arrival} (+${t.arrivalOffsetMs}ms into its round)${t.boost > 0n ? `  boost +${gwei(t.boost)} -> queue priority ${gwei(t.priority)} gwei` : ''}`
   const lines = [
     `round ${r.round}: waiting list -> ${ordering === 'pga' ? 'priority queue' : 'FIFO queue (PGA disabled)'} (${r.queue.length} tx)`,
     ...r.queue.map((t) => `  queue: ${row(t)}`),
@@ -214,7 +224,7 @@ export function formatRound(r: RoundInfo, ordering: 'pga' | 'fifo'): string[] {
     lines.push(`  held: ${short(h.hash)} from ${short(h.from)} nonce ${h.nonce}: waiting for nonce ${h.waitingFor} (held ${h.heldRounds} of ${h.limit} rounds)`)
   if (r.drained.length > 0) {
     lines.push(`round ${r.round}: drained order${ordering === 'pga' ? ' (highest effective tip first, ties by arrival; a sender\'s next nonce only)' : ' (arrival order; a sender\'s next nonce only)'}`)
-    r.drained.forEach((t, i) => lines.push(`  ${i + 1}. ${short(t.hash)} from ${short(t.from)} nonce ${t.nonce} effective tip ${gwei(t.effectiveTip)} gwei (arrival #${t.arrival}, +${t.arrivalOffsetMs}ms into its round)`))
+    r.drained.forEach((t, i) => lines.push(`  ${i + 1}. ${short(t.hash)} from ${short(t.from)} nonce ${t.nonce} effective tip ${drainedTip(t)} (arrival #${t.arrival}, +${t.arrivalOffsetMs}ms into its round)`))
     // Nonce rule: a same-sender N+1 placed after its N although it bids a higher tip.
     r.drained.forEach((t, i) => {
       const prev = r.drained!.slice(0, i).find((p) => senderKey(p.from) === senderKey(t.from) && p.nonce === t.nonce - 1)
@@ -238,12 +248,16 @@ export function formatBoost(r: RoundInfo, top = 3): string[] {
   if (full > 0) lines.push(`  block full: ${full} tx(s) carried over to the next round`)
   lines.push(`  boost: +p/(2K) = +${gwei(b.boost)} gwei (p ${gwei(b.p)} / (2 x ${b.k})) to ${b.carried.length} waiting txs; the boost moves their queue position only, never the fee`)
   const byPriority = [...b.carried].sort((x, y) => (x.boostedPriority === y.boostedPriority ? 0 : x.boostedPriority > y.boostedPriority ? -1 : 1))
+  const cw = {
+    tip: Math.max(0, ...b.carried.map((c) => `${gwei(c.effectiveTip)} gwei`.length)),
+    prio: Math.max(0, ...b.carried.map((c) => `${gwei(c.boostedPriority)} gwei`.length)),
+  }
   const shown = new Set(byPriority.slice(0, top))
   for (const c of b.carried) if (c.effectiveTip === 0n) shown.add(c) // always show a zero-tip tx
   for (const c of byPriority) {
     if (!shown.has(c)) continue
     lines.push(
-      `  waiting: ${short(c.hash)} from ${short(c.from)} nonce ${c.nonce} tip ${gwei(c.effectiveTip)} gwei -> boosted priority ${gwei(c.boostedPriority)} gwei${c.effectiveTip === 0n ? '  (zero tip)' : ''} (${c.reason})`,
+      `  waiting: ${short(c.hash)} from ${short(c.from)} nonce ${c.nonce} tip ${`${gwei(c.effectiveTip)} gwei`.padStart(cw.tip)} -> boosted priority ${`${gwei(c.boostedPriority)} gwei`.padStart(cw.prio)}${c.effectiveTip === 0n ? '  (zero tip)' : ''} (${c.reason})`,
     )
   }
   if (shown.size < b.carried.length) lines.push(`  ... and ${b.carried.length - shown.size} more waiting`)

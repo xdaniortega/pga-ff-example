@@ -28,7 +28,8 @@
   - `step`: cyan `==>`.
   - `note`/`noteLines`: yellow, exactly one `NOTE:` prefix; wrapped continuation lines are indented 6 spaces.
   - `warn`: bold yellow `WARNING:` on stdout, for flags ignored on attach and a `TICKET_ROUND_SECONDS` below 4×B.
-  - `important`: bold+inverse, for chapter headers `▶ CHAPTER n/6`, `YOUR TX:` lines and the closing `Mine:` line.
+  - `important`: bold+inverse full-width grey bar (terminal columns on a TTY), for chapter headers `▶ CHAPTER n/6`, `WHAT I/OTHERS SEE …`, and Enter prompts.
+  - `yours`: bold+inverse+cyan over the text only (not padded), for the "your result" class: `YOUR TX:` lines, chapter-4 lesson sentences, and the closing `Mine:` line.
   - `internal`/`sequencerAlways`/`feedServer`: magenta `[sequencer]`/`[feed]`.
   - `result`: bold green/red/yellow PASS/FAIL/INCONCLUSIVE.
   - `error`: red, stderr.

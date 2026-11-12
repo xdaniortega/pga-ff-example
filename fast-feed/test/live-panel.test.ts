@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createServer, type Server } from 'node:http'
 import { after, test } from 'node:test'
 import { parseGwei, type Hex } from 'viem'
-import { PALETTE } from '../../shared/narrate.ts'
+import { PALETTE, RESET } from '../../shared/narrate.ts'
 import {
   blockStatus,
   ffLeadMs,
@@ -264,7 +264,8 @@ test('LiveRounds.finish with colour forced and no out: the footer is yellow (not
     else process.env.FORCE_COLOR = prev
     if (prevNo !== undefined) process.env.NO_COLOR = prevNo
   }
-  assert.deepEqual(logged, [`${PALETTE.note}${FOOTER}\x1b[0m`])
+  // note(): bold NOTE: prefix over the yellow body (same shape as shared/test/narrate.test.ts)
+  assert.deepEqual(logged, [`${PALETTE.note}${PALETTE.bold}NOTE:${RESET}${PALETTE.note}${FOOTER.slice('NOTE:'.length)}${RESET}`])
 })
 
 test('formatPanel: below the full height the previous block is cut first; the open block keeps its header, status and newest rows', () => {

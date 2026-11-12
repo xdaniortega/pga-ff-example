@@ -135,7 +135,7 @@ test('formatFcfsComparison: PGA order next to the arrival order with gaps; yours
   assert.equal(s[0], 'hypothetical FCFS (local simulator data): round 2 of block 17')
   assert.match(s[1]!, /^real PGA order \(by tip\) +FCFS order \(by arrival; gap to the previous\)$/)
   const first = s[2]!
-  assert.match(first, new RegExp(`^1\\. X ${hash(X).slice(0, 8)}  1 gwei <- yours +1\\. D ${hash(4).slice(0, 8)} \\+4200ms \\(first\\)$`), first)
+  assert.match(first, new RegExp(`^1\\. X ${hash(X).slice(0, 8)} +1 gwei <- yours +1\\. D ${hash(4).slice(0, 8)} \\+4200ms \\(first\\)$`), first)
   assert.match(s[3]!, /2\. D .*0\.05 gwei +2\. E .*\+4500ms \(\+300ms\)/)
   assert.match(s[4]!, /3\. E .*0\.01 gwei +3\. X .*\+4700ms \(\+200ms\) <- yours/)
   assert.deepEqual([r.pgaPosition, r.fcfsPosition], [1, 3])
@@ -186,7 +186,8 @@ test('competitor txs are marked (c) in both tables (the timing table has the leg
   const t = formatTimingTable(rows, arrivals, 9000, { ...opts, competitors })
   for (const out of [f.lines, t]) {
     assert.ok(maxCols(out) <= 80, text(out).filter((l) => l.length > 80).join('\n'))
-    assert.match(text(out).join('\n'), new RegExp(`D ${hash(4).slice(0, 8)} \\(c\\)`))
+    // the timing table keeps (c) on the label; the FCFS left column moves it to the row tail (both name the same tx)
+    assert.ok(text(out).some((l) => l.includes(`D ${hash(4).slice(0, 8)}`) && l.includes('(c)')), text(out).join('\n'))
   }
   assert.match(flat(t), /\(c\) = competitor sent just before X\./)
 })
@@ -202,7 +203,7 @@ test('slow-motion sized numbers (5-digit ms offsets, a competitor and a letter) 
     assert.ok(!text(out).some((l) => l.endsWith('…')), 'a line was cut:\n' + text(out).join('\n'))
   }
   assert.match(text(t).join('\n'), /\+25000ms/)
-  assert.match(text(t).join('\n'), /wait\n.*\+7900ms\n/, 'the last column is intact')
+  assert.match(text(t).join('\n'), /wait\n.*\n.*\+7900ms\n/, 'the last column is intact (the rule line sits under the header)')
 })
 
 test('E3 story lines: block and round headers give Arbitrum One next to the local value, taken from the running config', () => {
@@ -226,7 +227,7 @@ test('E3 story lines: the slowed-down NOTE is the presenter sentence and the sea
 
 test('E3 formatRound2Lesson: at most two sentences, only for X observed in round 2; FIFO never says the tip ranked anything', () => {
   const lesson = formatRound2Lesson({ ordering: 'pga', inRound2: true, round1: ['A', 'B', 'C'], round1Total: 3, round2: ['D', 'E'], round2Total: 2 })
-  assert.ok(lesson.length <= 4 && lesson.every((l) => l.kind === 'important') && maxCols(lesson) <= 80)
+  assert.ok(lesson.length <= 4 && lesson.every((l) => l.kind === 'yours') && maxCols(lesson) <= 80)
   const f = flat(lesson)
   assert.match(f, /A, B and C were already final when you sent X: nothing you send goes before them\./)
   assert.match(f, /In round 2 you competed blind: X was ranked by tip against D and E\./)
@@ -425,12 +426,12 @@ test('F6 formatComparisonStage flags the table rows shown for the first time: st
   const s1 = formatComparisonStage(cmpInput(), 1)
   const rows1 = s1.filter((l) => l.row)
   assert.equal(rows1.length, 3, 'round 1 has 3 rows')
-  assert.ok(s1.indexOf(rows1[0]!) === 4 && s1.slice(4).every((l) => l.row), 'rows follow FF heading, block header, round header, column header')
+  assert.ok(s1.indexOf(rows1[0]!) === 5 && s1.slice(5).every((l) => l.row), 'rows follow FF heading, block header, round header, column header and its rule')
   const s2 = formatComparisonStage(cmpInput(), 2)
   const flagged = s2.filter((l) => l.row)
   assert.equal(flagged.length, 3, 'round 2 rows only: the round 1 reprint and the right side are not paced')
   assert.ok(flagged.every((l) => l.text.length > 0))
   const i2 = s2.findIndex((l) => l.text.startsWith('round 2 — '))
-  assert.ok(s2[i2 + 1]!.row !== true && s2[i2 + 2]!.row === true, 'header and column header are not rows')
+  assert.ok(s2[i2 + 1]!.row !== true && s2[i2 + 2]!.row !== true && s2[i2 + 3]!.row === true, 'header, column header and rule are not rows')
   assert.ok(!formatComparisonStage(cmpInput(), 3).some((l) => l.row), 'stage 3 is not paced')
 })

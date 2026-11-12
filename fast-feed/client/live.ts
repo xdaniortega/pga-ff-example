@@ -176,6 +176,9 @@ export interface TableOptions {
   bold?: boolean
 }
 
+/** Columns of the live tables that hold numbers: right-aligned so bids, tips, gas and fees line up. The index and the addresses stay left. */
+const RIGHT_ALIGNED = new Set([3, 4, 5, 6]) // bid, effective tip, gas used, fee paid
+
 export function formatTable(g: RoundGroup, opts: TableOptions = {}): string[] {
   const mine = opts.mine ?? new Set<string>()
   const head = ['tx_index', 'from', 'to', 'bid (maxPriorityFee / maxFee)', 'effective tip', 'gas used', 'fee paid']
@@ -189,7 +192,7 @@ export function formatTable(g: RoundGroup, opts: TableOptions = {}): string[] {
     fmtEth(r.feePaid),
   ])
   const widths = head.map((h, c) => Math.max(h.length, ...body.map((row) => row[c]!.length)))
-  const line = (cells: string[]) => cells.map((c, i) => c.padEnd(widths[i]!)).join('  ').trimEnd()
+  const line = (cells: string[]) => cells.map((c, i) => (RIGHT_ALIGNED.has(i) ? c.padStart(widths[i]!) : c.padEnd(widths[i]!))).join('  ').trimEnd()
   const out = [`── ${groupLabel(g)} · ${g.rows.length} tx${g.rows.length === 1 ? '' : 's'} ──`, `   ${line(head)}`]
   g.rows.forEach((r, i) => {
     const notes: string[] = []
